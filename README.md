@@ -59,28 +59,74 @@ The integration test (`parse_real_vpsdb`) is marked `#[ignore]` by default since
 
 ## Usage
 
+### Sync the VPS database
+
 ```sh
-# Fetch/refresh the VPS database
+# Fetch the database (skips download if already up to date)
 vpin-manager sync
 
-# Search for games
+# Force a full re-download
+vpin-manager sync --force
+```
+
+### Search for games
+
+```sh
+# Search by name
 vpin-manager search "Medieval Madness"
-vpin-manager search "Hook" --manufacturer "Data East" --format VPX
 
-# Show game details and available resources
-vpin-manager show <game-id>
+# Filter by manufacturer and table format
+vpin-manager search --manufacturer "Data East" --format VPX
 
-# Import existing files into your library
+# Filter by author (searches across all resource types)
+vpin-manager search --author "JPSalas"
+
+# Filter by year
+vpin-manager search --year 1992
+
+# Combine filters
+vpin-manager search "hook" --manufacturer "Data East" --format VPX
+
+# Sort by last updated, show more results
+vpin-manager search --sort updated --limit 50
+```
+
+### Show game details
+
+```sh
+# By game ID
+vpin-manager show 1IlVLynt
+
+# By name (if unique match)
+vpin-manager show "Hook"
+```
+
+Shows all resources grouped by type with versions, authors, features, and download URLs.
+
+### Configuration
+
+```sh
+# Show current configuration
+vpin-manager config
+
+# Show config file path
+vpin-manager config --path
+
+# Create default config file
+vpin-manager config --init
+```
+
+### Coming soon
+
+```sh
+# Import existing files into your library (planned)
 vpin-manager import ~/VPinball/Tables
 
-# List installed resources
+# List installed resources (planned)
 vpin-manager library
 
-# Check for updates
+# Check for updates (planned)
 vpin-manager library status
-
-# View/set configuration
-vpin-manager config
 ```
 
 ## Export Profiles
