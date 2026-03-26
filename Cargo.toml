@@ -18,4 +18,5 @@ tracing-subscriber = "0.3"
 clap = { version = "4", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
 directories = "6"
+toml = "0.8"
 vpin-manager-core = { path = "crates/vpin-manager-core" }
