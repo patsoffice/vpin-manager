@@ -1,0 +1,16 @@
+[package]
+name = "vpin-manager-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "vpin-manager"
+path = "src/main.rs"
+
+[dependencies]
+vpin-manager-core = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

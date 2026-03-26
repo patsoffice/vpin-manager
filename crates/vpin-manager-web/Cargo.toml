@@ -1,0 +1,15 @@
+[package]
+name = "vpin-manager-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "vpin-manager-web"
+path = "src/main.rs"
+
+[dependencies]
+vpin-manager-core = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
