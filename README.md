@@ -42,6 +42,21 @@ cargo build --release
 
 All dependencies are pure Rust (TLS via rustls, SQLite compiled from source via bundled feature). No system libraries required.
 
+## Testing
+
+```sh
+# Run all tests
+cargo test
+
+# Run tests for a specific crate
+cargo test -p vpin-manager-core
+
+# Run the full VPS database integration test (downloads ~6.7MB from the network)
+cargo test -p vpin-manager-core -- --ignored --nocapture
+```
+
+The integration test (`parse_real_vpsdb`) is marked `#[ignore]` by default since it fetches the full VPS database on every run. Use `--ignored` to include it.
+
 ## Usage
 
 ```sh
