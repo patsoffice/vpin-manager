@@ -529,8 +529,10 @@ fn cmd_import(
 
     let mut registered = 0;
     for m in &matches {
-        let resource = InstalledResource {
-            id: format!(
+        // Use VPS resource ID if we identified a specific resource, otherwise generate one
+        let id = match &m.matched_resource {
+            Some(r) => r.id().to_string(),
+            None => format!(
                 "import-{}-{}",
                 m.game.id,
                 m.file
@@ -539,18 +541,44 @@ fn cmd_import(
                     .and_then(|n| n.to_str())
                     .unwrap_or("unknown")
             ),
+        };
+
+        // Version: prefer file metadata, fall back to matched VPS resource
+        let version = m
+            .file
+            .vpx_metadata
+            .as_ref()
+            .and_then(|meta| meta.table_version.clone())
+            .or_else(|| {
+                m.matched_resource
+                    .as_ref()
+                    .and_then(|r| r.version().map(|v| v.to_string()))
+            });
+
+        // Authors: prefer file metadata, fall back to matched VPS resource
+        let authors = {
+            let from_file = extract_authors(m.file);
+            if from_file.is_empty() {
+                m.matched_resource
+                    .as_ref()
+                    .map(|r| r.authors().to_vec())
+                    .unwrap_or_default()
+            } else {
+                from_file
+            }
+        };
+
+        let resource = InstalledResource {
+            id,
             game_id: m.game.id.clone(),
             game_name: m.game.name.clone(),
             resource_type: m.file.resource_type.to_string().to_lowercase(),
-            version: m
-                .file
-                .vpx_metadata
-                .as_ref()
-                .and_then(|meta| meta.table_version.clone()),
+            version,
             file_path: m.file.path.to_string_lossy().to_string(),
             installed_at: None,
             vps_updated_at: m.game.updated_at,
             metadata: Some(format!("{{\"confidence\":\"{}\",\"score\":{:.2}}}", m.confidence, m.score)),
+            authors,
         };
         db.upsert_installed(&resource)?;
         registered += 1;
@@ -605,22 +633,28 @@ fn cmd_library_list(
     let name_w = 30;
     let type_w = 12;
     let ver_w = 8;
+    let author_w = 25;
 
     println!(
-        "{:<name_w$}  {:<type_w$}  {:<ver_w$}  Path",
-        "Game", "Type", "Version",
+        "{:<name_w$}  {:<type_w$}  {:<ver_w$}  {:<author_w$}  Path",
+        "Game", "Type", "Version", "Authors",
     );
     println!(
-        "{:<name_w$}  {:<type_w$}  {:<ver_w$}  ----",
-        "----", "----", "-------",
+        "{:<name_w$}  {:<type_w$}  {:<ver_w$}  {:<author_w$}  ----",
+        "----", "----", "-------", "-------",
     );
 
     for r in &resources {
         let name = truncate(&r.game_name, name_w);
         let rtype = truncate(&r.resource_type, type_w);
         let ver = truncate(r.version.as_deref().unwrap_or("-"), ver_w);
+        let authors = if r.authors.is_empty() {
+            "-".to_string()
+        } else {
+            truncate(&r.authors.join(", "), author_w)
+        };
         let path = &r.file_path;
-        println!("{name:<name_w$}  {rtype:<type_w$}  {ver:<ver_w$}  {path}");
+        println!("{name:<name_w$}  {rtype:<type_w$}  {ver:<ver_w$}  {authors:<author_w$}  {path}");
     }
 
     Ok(())
@@ -873,6 +907,29 @@ fn print_tutorial_section(tutorials: &[vpin_manager_core::vpsdb::models::Tutoria
         }
     }
     println!();
+}
+
+/// Extract authors from file metadata (VPX or B2S).
+fn extract_authors(file: &vpin_manager_core::library::scanner::ScannedFile) -> Vec<String> {
+    if let Some(ref meta) = file.vpx_metadata {
+        if let Some(ref author) = meta.author_name {
+            return author
+                .split([',', '&', '/'])
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+        }
+    }
+    if let Some(ref meta) = file.b2s_metadata {
+        if let Some(ref author) = meta.author {
+            return author
+                .split([',', '&', '/'])
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+        }
+    }
+    vec![]
 }
 
 fn truncate(s: &str, max: usize) -> String {

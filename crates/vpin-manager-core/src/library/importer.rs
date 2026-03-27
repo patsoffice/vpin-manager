@@ -1,5 +1,6 @@
+use crate::config::ResourceType;
 use crate::library::scanner::ScannedFile;
-use crate::vpsdb::models::Game;
+use crate::vpsdb::models::{B2sFile, Game, ResourceFile, RomFile, TableFile};
 
 /// Confidence level of a match between a scanned file and a VPS game.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -19,6 +20,44 @@ impl std::fmt::Display for Confidence {
     }
 }
 
+/// A reference to a specific resource file entry within a VPS game.
+#[derive(Debug, Clone)]
+pub enum MatchedResource<'a> {
+    Table(&'a TableFile),
+    Backglass(&'a B2sFile),
+    Rom(&'a RomFile),
+    Other(&'a ResourceFile),
+}
+
+impl<'a> MatchedResource<'a> {
+    pub fn id(&self) -> &str {
+        match self {
+            MatchedResource::Table(t) => &t.id,
+            MatchedResource::Backglass(b) => &b.id,
+            MatchedResource::Rom(r) => &r.id,
+            MatchedResource::Other(o) => &o.id,
+        }
+    }
+
+    pub fn version(&self) -> Option<&str> {
+        match self {
+            MatchedResource::Table(t) => t.version.as_deref(),
+            MatchedResource::Backglass(b) => b.version.as_deref(),
+            MatchedResource::Rom(r) => r.version.as_deref(),
+            MatchedResource::Other(o) => o.version.as_deref(),
+        }
+    }
+
+    pub fn authors(&self) -> &[String] {
+        match self {
+            MatchedResource::Table(t) => &t.authors,
+            MatchedResource::Backglass(b) => &b.authors,
+            MatchedResource::Rom(r) => &r.authors,
+            MatchedResource::Other(o) => &o.authors,
+        }
+    }
+}
+
 /// A proposed match between a scanned file and a VPS game entry.
 #[derive(Debug, Clone)]
 pub struct MatchResult<'a> {
@@ -26,6 +65,8 @@ pub struct MatchResult<'a> {
     pub game: &'a Game,
     pub confidence: Confidence,
     pub score: f64,
+    /// The specific resource file entry within the game, if identified.
+    pub matched_resource: Option<MatchedResource<'a>>,
 }
 
 /// A scanned file that couldn't be matched to any game.
@@ -53,8 +94,6 @@ pub fn match_files<'a>(
         .collect();
 
     // Build a ROM identifier -> Game lookup from VPS DB romFiles.
-    // The `version` field contains the ROM ID (e.g., "mm_109c", "hook_501").
-    // The `name` field sometimes also contains a ROM ID.
     let rom_games: std::collections::HashMap<String, &Game> = games
         .iter()
         .flat_map(|g| {
@@ -70,8 +109,7 @@ pub fn match_files<'a>(
         })
         .collect();
 
-    // Also collect ROM names from VPX metadata we've already read,
-    // so we can match ROM zip files against games found via VPX tables.
+    // Also collect ROM names from VPX metadata we've already read.
     let vpx_rom_games: std::collections::HashMap<String, &Game> = files
         .iter()
         .filter_map(|f| {
@@ -97,11 +135,13 @@ pub fn match_files<'a>(
             if let Some(ref game_name) = meta.game_name {
                 let lower = game_name.to_lowercase();
                 if let Some(&game) = rom_games.get(&lower).or_else(|| vpx_rom_games.get(&lower)) {
+                    let matched_resource = find_matching_b2s_file(file, game);
                     matches.push(MatchResult {
                         file,
                         game,
                         confidence: Confidence::High,
                         score: 1.0,
+                        matched_resource,
                     });
                     continue;
                 }
@@ -109,14 +149,16 @@ pub fn match_files<'a>(
         }
 
         // For ROM files, try matching stem against known ROM identifiers
-        if file.resource_type == crate::config::ResourceType::Roms {
+        if file.resource_type == ResourceType::Roms {
             let lower_stem = file.stem.to_lowercase();
             if let Some(&game) = rom_games.get(&lower_stem).or_else(|| vpx_rom_games.get(&lower_stem)) {
+                let matched_resource = find_matching_rom_file(file, game);
                 matches.push(MatchResult {
                     file,
                     game,
                     confidence: Confidence::High,
                     score: 1.0,
+                    matched_resource,
                 });
                 continue;
             }
@@ -134,11 +176,13 @@ pub fn match_files<'a>(
                 Confidence::Low
             };
 
+            let matched_resource = find_resource_for_file(file, game);
             matches.push(MatchResult {
                 file,
                 game,
                 confidence,
                 score,
+                matched_resource,
             });
         } else {
             unmatched.push(Unmatched { file });
@@ -166,11 +210,13 @@ fn try_vpx_metadata_match<'a>(
     // Try ROM name match first (most precise)
     if let Some(ref rom) = meta.rom_name {
         if let Some(&game) = rom_games.get(&rom.to_lowercase()) {
+            let matched_resource = find_matching_table_file(file, game);
             return Some(MatchResult {
                 file,
                 game,
                 confidence: Confidence::High,
                 score: 1.0,
+                matched_resource,
             });
         }
     }
@@ -187,11 +233,13 @@ fn try_vpx_metadata_match<'a>(
                 } else {
                     Confidence::Low
                 };
+                let matched_resource = find_matching_table_file(file, game);
                 return Some(MatchResult {
                     file,
                     game,
                     confidence,
                     score,
+                    matched_resource,
                 });
             }
         }
@@ -200,8 +248,127 @@ fn try_vpx_metadata_match<'a>(
     None
 }
 
+// --- Resource-level matching ---
+
+/// Dispatch to the appropriate resource matcher based on file type.
+fn find_resource_for_file<'a>(
+    file: &ScannedFile,
+    game: &'a Game,
+) -> Option<MatchedResource<'a>> {
+    match file.resource_type {
+        ResourceType::Tables => find_matching_table_file(file, game),
+        ResourceType::Backglasses => find_matching_b2s_file(file, game),
+        ResourceType::Roms => find_matching_rom_file(file, game),
+        _ => None,
+    }
+}
+
+/// Find the best matching TableFile within a game using VPX metadata.
+fn find_matching_table_file<'a>(
+    file: &ScannedFile,
+    game: &'a Game,
+) -> Option<MatchedResource<'a>> {
+    if game.table_files.is_empty() {
+        return None;
+    }
+    if game.table_files.len() == 1 {
+        return Some(MatchedResource::Table(&game.table_files[0]));
+    }
+
+    let meta = file.vpx_metadata.as_ref();
+
+    let mut best: Option<(&TableFile, u32)> = None;
+
+    for tf in &game.table_files {
+        let mut score: u32 = 0;
+
+        // Format match (VPX files are always VPX format)
+        if tf.table_format.as_deref() == Some("VPX") {
+            score += 1;
+        }
+
+        // Author match
+        if let Some(ref file_author) = meta.and_then(|m| m.author_name.as_ref()) {
+            let lower = file_author.to_lowercase();
+            if tf.authors.iter().any(|a| {
+                let a_lower = a.to_lowercase();
+                a_lower.contains(&lower) || lower.contains(&a_lower)
+            }) {
+                score += 3;
+            }
+        }
+
+        // Version match
+        if let Some(ref file_version) = meta.and_then(|m| m.table_version.as_ref()) {
+            if let Some(ref tf_version) = tf.version {
+                if tf_version == *file_version {
+                    score += 2;
+                }
+            }
+        }
+
+        if score > 0 {
+            if best.is_none() || score > best.unwrap().1 {
+                best = Some((tf, score));
+            }
+        }
+    }
+
+    best.map(|(tf, _)| MatchedResource::Table(tf))
+}
+
+/// Find the best matching B2sFile within a game using B2S metadata.
+fn find_matching_b2s_file<'a>(
+    file: &ScannedFile,
+    game: &'a Game,
+) -> Option<MatchedResource<'a>> {
+    if game.b2s_files.is_empty() {
+        return None;
+    }
+    if game.b2s_files.len() == 1 {
+        return Some(MatchedResource::Backglass(&game.b2s_files[0]));
+    }
+
+    let meta = file.b2s_metadata.as_ref();
+
+    // Try author match
+    if let Some(ref file_author) = meta.and_then(|m| m.author.as_ref()) {
+        let lower = file_author.to_lowercase();
+        for bf in &game.b2s_files {
+            if bf.authors.iter().any(|a| {
+                let a_lower = a.to_lowercase();
+                a_lower.contains(&lower) || lower.contains(&a_lower)
+            }) {
+                return Some(MatchedResource::Backglass(bf));
+            }
+        }
+    }
+
+    None
+}
+
+/// Find the matching RomFile within a game by ROM identifier.
+fn find_matching_rom_file<'a>(
+    file: &ScannedFile,
+    game: &'a Game,
+) -> Option<MatchedResource<'a>> {
+    let lower_stem = file.stem.to_lowercase();
+
+    for rf in &game.rom_files {
+        if rf.version.as_ref().is_some_and(|v| v.to_lowercase() == lower_stem) {
+            return Some(MatchedResource::Rom(rf));
+        }
+        if rf.name.as_ref().is_some_and(|n| n.to_lowercase() == lower_stem) {
+            return Some(MatchedResource::Rom(rf));
+        }
+    }
+
+    None
+}
+
+// --- Matching helpers ---
+
 /// Find the best matching game for a normalized file stem.
-/// Returns the game and a similarity score (0.0 to 1.0).
 fn find_best_match<'a>(
     stem: &str,
     games: &[(&'a Game, String)],
@@ -221,18 +388,11 @@ fn find_best_match<'a>(
     best
 }
 
-/// Normalize a name for comparison:
-/// - Lowercase
-/// - Remove all parenthesized content like "(Williams 1992)" or "(Author Mod)"
-/// - Replace separators (underscores, hyphens, dots) with spaces
-/// - Strip common suffixes and tokens
-/// - Remove version patterns
-/// - Collapse whitespace
-/// - Trim
+/// Normalize a name for comparison.
 fn normalize(name: &str) -> String {
     let mut s = name.to_lowercase();
 
-    // Remove all parenthesized content: "(Williams 1992)", "(Author Mod)", etc.
+    // Remove all parenthesized content
     while let Some(start) = s.find('(') {
         if let Some(end) = s[start..].find(')') {
             s.replace_range(start..start + end + 1, "");
@@ -245,7 +405,7 @@ fn normalize(name: &str) -> String {
     // Replace separators with spaces
     s = s.replace(['_', '-', '.'], " ");
 
-    // Remove common non-game-name tokens wherever they appear as whole words
+    // Remove common non-game-name tokens
     let strip_words = [
         "vpx", "vpt", "fx", "fx2", "fx3", "fpt", "vpw",
         "mod", "premium", "le", "pro", "se", "ce",
@@ -261,48 +421,34 @@ fn normalize(name: &str) -> String {
         .collect();
     s = filtered.join(" ");
 
-    // Remove trailing version patterns like "v1.0.0", "1.0", "3 1", "v1 2 2"
-    // After separator replacement, these look like "v1 0 0" or "1 2"
-    // Also handles no-space versions like "tablev1 0" from "tablev1.0"
-    let version_pattern = regex_lite::Regex::new(
-        r"\s*v\d+(\s+\d+)*\s*$"
-    ).unwrap();
+    // Remove trailing version patterns
+    let version_pattern = regex_lite::Regex::new(r"\s*v\d+(\s+\d+)*\s*$").unwrap();
     s = version_pattern.replace(&s, "").to_string();
 
-    // Also strip trailing bare numbers like " 3 1" or " 2 0"
-    let trailing_numbers = regex_lite::Regex::new(
-        r"\s+\d+(\s+\d+)*\s*$"
-    ).unwrap();
+    let trailing_numbers = regex_lite::Regex::new(r"\s+\d+(\s+\d+)*\s*$").unwrap();
     s = trailing_numbers.replace(&s, "").to_string();
 
-    // Collapse whitespace and trim
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Compute similarity between two normalized strings.
-/// Uses a combination of:
-/// 1. Exact match (1.0)
-/// 2. One contains the other (0.8-0.95 depending on length ratio)
-/// 3. Word overlap (Jaccard-like score)
 fn similarity(a: &str, b: &str) -> f64 {
     if a == b {
         return 1.0;
     }
-
     if a.is_empty() || b.is_empty() {
         return 0.0;
     }
 
-    // Containment check — higher score for closer length match
+    // Containment check
     if a.contains(b) || b.contains(a) {
         let shorter = a.len().min(b.len()) as f64;
         let longer = a.len().max(b.len()) as f64;
         let ratio = shorter / longer;
-        // Scale between 0.75 and 0.98 based on length ratio
         return 0.75 + (ratio * 0.23);
     }
 
-    // Word overlap (Jaccard similarity on words)
+    // Word overlap (Jaccard similarity)
     let words_a: std::collections::HashSet<&str> = a.split_whitespace().collect();
     let words_b: std::collections::HashSet<&str> = b.split_whitespace().collect();
 
@@ -319,7 +465,6 @@ fn similarity(a: &str, b: &str) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ResourceType;
     use std::path::PathBuf;
 
     fn make_scanned(stem: &str) -> ScannedFile {
@@ -366,6 +511,57 @@ mod tests {
         }
     }
 
+    fn make_table_file(id: &str, authors: &[&str], version: &str) -> TableFile {
+        TableFile {
+            id: id.to_string(),
+            version: Some(version.to_string()),
+            authors: authors.iter().map(|a| a.to_string()).collect(),
+            features: vec![],
+            urls: vec![],
+            comment: None,
+            img_url: None,
+            table_format: Some("VPX".to_string()),
+            edition: None,
+            theme: vec![],
+            game_file_name: None,
+            parent_id: None,
+            created_at: None,
+            updated_at: None,
+            game: None,
+        }
+    }
+
+    fn make_b2s_file(id: &str, authors: &[&str], version: &str) -> B2sFile {
+        B2sFile {
+            id: id.to_string(),
+            version: Some(version.to_string()),
+            authors: authors.iter().map(|a| a.to_string()).collect(),
+            features: vec![],
+            urls: vec![],
+            comment: None,
+            img_url: None,
+            created_at: None,
+            updated_at: None,
+            game: None,
+        }
+    }
+
+    fn make_rom_file(id: &str, rom_id: &str) -> RomFile {
+        RomFile {
+            id: id.to_string(),
+            version: Some(rom_id.to_string()),
+            authors: vec![],
+            urls: vec![],
+            comment: None,
+            name: None,
+            created_at: None,
+            updated_at: None,
+            game: None,
+        }
+    }
+
+    // --- Normalize tests ---
+
     #[test]
     fn normalize_strips_separators() {
         assert_eq!(normalize("Medieval_Madness"), "medieval madness");
@@ -381,44 +577,21 @@ mod tests {
 
     #[test]
     fn normalize_strips_parenthesized() {
-        assert_eq!(
-            normalize("Medieval Madness (Bigus Mod)"),
-            "medieval madness"
-        );
+        assert_eq!(normalize("Medieval Madness (Bigus Mod)"), "medieval madness");
     }
 
     #[test]
     fn normalize_real_world_filenames() {
-        // Common VPX naming patterns from real collections
-        assert_eq!(
-            normalize("Fish Tales (Williams 1992) VPW 1.1"),
-            "fish tales"
-        );
-        assert_eq!(
-            normalize("Goldeneye (Sega 1996) VPW 1.2"),
-            "goldeneye"
-        );
-        assert_eq!(
-            normalize("Judge Dredd (Bally 1993) 3.1"),
-            "judge dredd"
-        );
-        assert_eq!(
-            normalize("Metallica Premium Monsters (Stern 2013) VPW 2.0"),
-            "metallica monsters"
-        );
-        assert_eq!(
-            normalize("Catacomb (Stern 1981) v2.0.1"),
-            "catacomb"
-        );
-        assert_eq!(
-            normalize("Fathom (Bally 1981) FrankEnstein 3.0.2"),
-            "fathom"
-        );
-        assert_eq!(
-            normalize("KILLERINSTINCTv1.0"),
-            "killerinstinct"
-        );
+        assert_eq!(normalize("Fish Tales (Williams 1992) VPW 1.1"), "fish tales");
+        assert_eq!(normalize("Goldeneye (Sega 1996) VPW 1.2"), "goldeneye");
+        assert_eq!(normalize("Judge Dredd (Bally 1993) 3.1"), "judge dredd");
+        assert_eq!(normalize("Metallica Premium Monsters (Stern 2013) VPW 2.0"), "metallica monsters");
+        assert_eq!(normalize("Catacomb (Stern 1981) v2.0.1"), "catacomb");
+        assert_eq!(normalize("Fathom (Bally 1981) FrankEnstein 3.0.2"), "fathom");
+        assert_eq!(normalize("KILLERINSTINCTv1.0"), "killerinstinct");
     }
+
+    // --- Game-level matching tests ---
 
     #[test]
     fn exact_match_high_confidence() {
@@ -468,7 +641,6 @@ mod tests {
 
         let results = match_files(&files, &games);
         assert_eq!(results.matches.len(), 1);
-        // "hook" is contained in "hook data east 1992 bigus", but length ratio is low
         assert!(results.matches[0].score >= 0.5);
     }
 
@@ -489,6 +661,8 @@ mod tests {
         assert_eq!(results.unmatched.len(), 1);
     }
 
+    // --- Similarity tests ---
+
     #[test]
     fn similarity_exact() {
         assert_eq!(similarity("hook", "hook"), 1.0);
@@ -507,6 +681,8 @@ mod tests {
         assert!(score < 0.5);
     }
 
+    // --- ROM matching tests ---
+
     fn make_rom_scanned(stem: &str) -> ScannedFile {
         ScannedFile {
             path: PathBuf::from(format!("/roms/{stem}.zip")),
@@ -520,20 +696,7 @@ mod tests {
 
     fn make_game_with_roms(id: &str, name: &str, rom_ids: &[&str]) -> Game {
         let mut game = make_game(id, name);
-        game.rom_files = rom_ids
-            .iter()
-            .map(|rom| crate::vpsdb::models::RomFile {
-                id: rom.to_string(),
-                version: Some(rom.to_string()),
-                authors: vec![],
-                urls: vec![],
-                comment: None,
-                name: None,
-                created_at: None,
-                updated_at: None,
-                game: None,
-            })
-            .collect();
+        game.rom_files = rom_ids.iter().map(|rom| make_rom_file(rom, rom)).collect();
         game
     }
 
@@ -562,6 +725,20 @@ mod tests {
         assert_eq!(hook.file.stem, "hook_501");
     }
 
+    #[test]
+    fn rom_match_identifies_specific_rom_file() {
+        let files = vec![make_rom_scanned("hook_501")];
+        let games = vec![make_game_with_roms("g1", "Hook", &["hook_501", "hook_500"])];
+
+        let results = match_files(&files, &games);
+        let m = &results.matches[0];
+        assert!(m.matched_resource.is_some());
+        let resource = m.matched_resource.as_ref().unwrap();
+        assert_eq!(resource.id(), "hook_501");
+    }
+
+    // --- B2S matching tests ---
+
     fn make_b2s_scanned(stem: &str, game_name: &str) -> ScannedFile {
         ScannedFile {
             path: PathBuf::from(format!("/tables/{stem}.directb2s")),
@@ -583,9 +760,7 @@ mod tests {
             make_b2s_scanned("SomeBackglass", "mm_109c"),
             make_b2s_scanned("AnotherGlass", "unknown_rom"),
         ];
-        let games = vec![
-            make_game_with_roms("g1", "Medieval Madness", &["mm_109c"]),
-        ];
+        let games = vec![make_game_with_roms("g1", "Medieval Madness", &["mm_109c"])];
 
         let results = match_files(&files, &games);
         assert_eq!(results.matches.len(), 1);
@@ -601,5 +776,156 @@ mod tests {
         let results = match_files(&files, &games);
         assert_eq!(results.matches.len(), 1);
         assert_eq!(results.matches[0].confidence, Confidence::High);
+    }
+
+    // --- Resource-level matching tests ---
+
+    #[test]
+    fn single_table_file_always_matched() {
+        let mut game = make_game("g1", "Hook");
+        game.table_files = vec![make_table_file("tf1", &["Author1"], "1.0")];
+
+        let files = vec![make_scanned("Hook")];
+        let games = vec![game];
+
+        let results = match_files(&files, &games);
+        let m = &results.matches[0];
+        assert!(m.matched_resource.is_some());
+        assert_eq!(m.matched_resource.as_ref().unwrap().id(), "tf1");
+    }
+
+    #[test]
+    fn table_file_matched_by_author() {
+        let mut game = make_game("g1", "Hook");
+        game.table_files = vec![
+            make_table_file("tf1", &["Bigus1", "Javier15"], "3.0"),
+            make_table_file("tf2", &["VPW", "Javier15"], "1.0"),
+            make_table_file("tf3", &["Arconovum", "Javier15"], "1.21"),
+        ];
+
+        let mut file = make_scanned("Hook");
+        file.vpx_metadata = Some(crate::vpx::VpxMetadata {
+            table_name: Some("Hook".to_string()),
+            author_name: Some("Bigus1".to_string()),
+            table_version: None,
+            rom_name: None,
+            requires_pinmame: false,
+            table_description: None,
+            table_blurb: None,
+            release_date: None,
+        });
+
+        let files = vec![file];
+        let games = vec![game];
+
+        let results = match_files(&files, &games);
+        let m = &results.matches[0];
+        assert!(m.matched_resource.is_some());
+        assert_eq!(m.matched_resource.as_ref().unwrap().id(), "tf1");
+    }
+
+    #[test]
+    fn table_file_matched_by_author_and_version() {
+        let mut game = make_game("g1", "Hook");
+        game.table_files = vec![
+            make_table_file("tf1", &["Bigus1"], "3.0"),
+            make_table_file("tf2", &["Bigus1"], "2.0"),
+        ];
+
+        let mut file = make_scanned("Hook");
+        file.vpx_metadata = Some(crate::vpx::VpxMetadata {
+            table_name: Some("Hook".to_string()),
+            author_name: Some("Bigus1".to_string()),
+            table_version: Some("3.0".to_string()),
+            rom_name: None,
+            requires_pinmame: false,
+            table_description: None,
+            table_blurb: None,
+            release_date: None,
+        });
+
+        let files = vec![file];
+        let games = vec![game];
+
+        let results = match_files(&files, &games);
+        let m = &results.matches[0];
+        assert!(m.matched_resource.is_some());
+        assert_eq!(m.matched_resource.as_ref().unwrap().id(), "tf1");
+        assert_eq!(m.matched_resource.as_ref().unwrap().version(), Some("3.0"));
+    }
+
+    #[test]
+    fn b2s_file_matched_by_author() {
+        let mut game = make_game("g1", "Hook");
+        game.rom_files = vec![make_rom_file("r1", "hook_501")];
+        game.b2s_files = vec![
+            make_b2s_file("b1", &["HauntFreaks"], "2.0"),
+            make_b2s_file("b2", &["Wildman"], "1.0"),
+        ];
+
+        let file = ScannedFile {
+            path: PathBuf::from("/tables/Hook.directb2s"),
+            resource_type: ResourceType::Backglasses,
+            stem: "Hook".to_string(),
+            size: 2000,
+            vpx_metadata: None,
+            b2s_metadata: Some(crate::b2s::B2sMetadata {
+                name: Some("Hook".to_string()),
+                game_name: Some("hook_501".to_string()),
+                author: Some("HauntFreaks".to_string()),
+            }),
+        };
+
+        let files = vec![file];
+        let games = vec![game];
+
+        let results = match_files(&files, &games);
+        let m = &results.matches[0];
+        assert!(m.matched_resource.is_some());
+        assert_eq!(m.matched_resource.as_ref().unwrap().id(), "b1");
+    }
+
+    #[test]
+    fn matched_resource_provides_version_and_authors() {
+        let mut game = make_game("g1", "Hook");
+        game.table_files = vec![make_table_file("tf1", &["Author1", "Author2"], "2.5")];
+
+        let files = vec![make_scanned("Hook")];
+        let games = vec![game];
+
+        let results = match_files(&files, &games);
+        let resource = results.matches[0].matched_resource.as_ref().unwrap();
+        assert_eq!(resource.version(), Some("2.5"));
+        assert_eq!(resource.authors(), &["Author1", "Author2"]);
+    }
+
+    #[test]
+    fn no_metadata_still_matches_on_format() {
+        let mut game = make_game("g1", "Hook");
+        game.table_files = vec![
+            make_table_file("tf1", &["Author1"], "1.0"),
+            make_table_file("tf2", &["Author2"], "2.0"),
+        ];
+
+        // No VPX metadata — both are VPX format so one gets picked
+        let files = vec![make_scanned("Hook")];
+        let games = vec![game];
+
+        let results = match_files(&files, &games);
+        let m = &results.matches[0];
+        // Still picks a resource based on format match alone
+        assert!(m.matched_resource.is_some());
+    }
+
+    #[test]
+    fn no_resource_match_with_no_table_files() {
+        let game = make_game("g1", "Hook");
+
+        let files = vec![make_scanned("Hook")];
+        let games = vec![game];
+
+        let results = match_files(&files, &games);
+        let m = &results.matches[0];
+        assert!(m.matched_resource.is_none());
     }
 }

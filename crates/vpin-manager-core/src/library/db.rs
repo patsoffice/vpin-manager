@@ -3,7 +3,7 @@ use std::path::Path;
 use rusqlite::{params, Connection, OptionalExtension};
 
 /// Current schema version. Bump this when adding migrations.
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 
 /// A library database instance. Each database file tracks installed resources
 /// independently, allowing multiple libraries (e.g., per-cabinet or per-profile).
@@ -43,6 +43,9 @@ impl LibraryDb {
         let version = self.get_schema_version()?;
         if version < 1 {
             self.migrate_v1()?;
+        }
+        if version < 2 {
+            self.migrate_v2()?;
         }
         self.set_schema_version(SCHEMA_VERSION)?;
         Ok(())
@@ -102,11 +105,56 @@ impl LibraryDb {
         Ok(())
     }
 
+    fn migrate_v2(&self) -> Result<(), DbError> {
+        self.conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS authors (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                name            TEXT NOT NULL UNIQUE
+            );
+
+            CREATE TABLE IF NOT EXISTS resource_authors (
+                resource_id     TEXT NOT NULL REFERENCES installed_resources(id) ON DELETE CASCADE,
+                author_id       INTEGER NOT NULL REFERENCES authors(id) ON DELETE CASCADE,
+                PRIMARY KEY (resource_id, author_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_resource_authors_resource
+                ON resource_authors(resource_id);
+            CREATE INDEX IF NOT EXISTS idx_resource_authors_author
+                ON resource_authors(author_id);
+            ",
+        )?;
+        Ok(())
+    }
+
     // --- Installed Resources ---
 
-    /// Insert or replace an installed resource.
+    /// Insert or replace an installed resource, including its authors.
+    /// If a resource with the same file_path already exists, it is updated
+    /// (even if the ID differs) to prevent duplicates.
     pub fn upsert_installed(&self, resource: &InstalledResource) -> Result<(), DbError> {
-        self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+
+        // Remove any existing entry with the same file_path but different ID
+        let existing_id: Option<String> = tx
+            .query_row(
+                "SELECT id FROM installed_resources WHERE file_path = ?1",
+                params![resource.file_path],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        if let Some(ref old_id) = existing_id {
+            if old_id != &resource.id {
+                tx.execute(
+                    "DELETE FROM installed_resources WHERE id = ?1",
+                    params![old_id],
+                )?;
+            }
+        }
+
+        tx.execute(
             "INSERT OR REPLACE INTO installed_resources
                 (id, game_id, game_name, resource_type, version, file_path, installed_at, vps_updated_at, metadata)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'), ?7, ?8)",
@@ -121,10 +169,30 @@ impl LibraryDb {
                 resource.metadata,
             ],
         )?;
+
+        // Clear existing author associations and re-insert
+        tx.execute(
+            "DELETE FROM resource_authors WHERE resource_id = ?1",
+            params![resource.id],
+        )?;
+
+        for author_name in &resource.authors {
+            tx.execute(
+                "INSERT OR IGNORE INTO authors (name) VALUES (?1)",
+                params![author_name],
+            )?;
+            tx.execute(
+                "INSERT OR IGNORE INTO resource_authors (resource_id, author_id)
+                 SELECT ?1, id FROM authors WHERE name = ?2",
+                params![resource.id, author_name],
+            )?;
+        }
+
+        tx.commit()?;
         Ok(())
     }
 
-    /// Get an installed resource by VPS resource ID.
+    /// Get an installed resource by VPS resource ID, including authors.
     pub fn get_installed(&self, id: &str) -> Result<Option<InstalledResource>, DbError> {
         let result = self
             .conn
@@ -133,22 +201,17 @@ impl LibraryDb {
                         installed_at, vps_updated_at, metadata
                  FROM installed_resources WHERE id = ?1",
                 params![id],
-                |row| {
-                    Ok(InstalledResource {
-                        id: row.get(0)?,
-                        game_id: row.get(1)?,
-                        game_name: row.get(2)?,
-                        resource_type: row.get(3)?,
-                        version: row.get(4)?,
-                        file_path: row.get(5)?,
-                        installed_at: row.get(6)?,
-                        vps_updated_at: row.get(7)?,
-                        metadata: row.get(8)?,
-                    })
-                },
+                row_to_installed,
             )
             .optional()?;
-        Ok(result)
+
+        match result {
+            Some(mut resource) => {
+                resource.authors = self.get_authors_for(&resource.id)?;
+                Ok(Some(resource))
+            }
+            None => Ok(None),
+        }
     }
 
     /// List all installed resources, optionally filtered by game ID.
@@ -182,11 +245,17 @@ impl LibraryDb {
             }
         }
 
+        // Populate authors for each resource
+        for resource in &mut resources {
+            resource.authors = self.get_authors_for(&resource.id)?;
+        }
+
         Ok(resources)
     }
 
     /// Remove an installed resource by ID.
     pub fn remove_installed(&self, id: &str) -> Result<bool, DbError> {
+        // resource_authors cleaned up by ON DELETE CASCADE
         let count = self.conn.execute(
             "DELETE FROM installed_resources WHERE id = ?1",
             params![id],
@@ -215,6 +284,59 @@ impl LibraryDb {
             ids.push(row?);
         }
         Ok(ids)
+    }
+
+    // --- Authors ---
+
+    /// Get authors for a specific resource.
+    fn get_authors_for(&self, resource_id: &str) -> Result<Vec<String>, DbError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT a.name FROM authors a
+             JOIN resource_authors ra ON ra.author_id = a.id
+             WHERE ra.resource_id = ?1
+             ORDER BY a.name",
+        )?;
+        let rows = stmt.query_map(params![resource_id], |row| row.get(0))?;
+        let mut authors = Vec::new();
+        for row in rows {
+            authors.push(row?);
+        }
+        Ok(authors)
+    }
+
+    /// List all known authors.
+    pub fn list_authors(&self) -> Result<Vec<String>, DbError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT name FROM authors ORDER BY name")?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        let mut authors = Vec::new();
+        for row in rows {
+            authors.push(row?);
+        }
+        Ok(authors)
+    }
+
+    /// Find resources by author name (case-insensitive substring).
+    pub fn find_by_author(&self, author: &str) -> Result<Vec<InstalledResource>, DbError> {
+        let pattern = format!("%{author}%");
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT r.id, r.game_id, r.game_name, r.resource_type, r.version,
+                    r.file_path, r.installed_at, r.vps_updated_at, r.metadata
+             FROM installed_resources r
+             JOIN resource_authors ra ON ra.resource_id = r.id
+             JOIN authors a ON a.id = ra.author_id
+             WHERE a.name LIKE ?1
+             ORDER BY r.game_name, r.resource_type",
+        )?;
+        let rows = stmt.query_map(params![pattern], row_to_installed)?;
+        let mut resources = Vec::new();
+        for row in rows {
+            let mut resource = row?;
+            resource.authors = self.get_authors_for(&resource.id)?;
+            resources.push(resource);
+        }
+        Ok(resources)
     }
 
     // --- Download History ---
@@ -287,6 +409,7 @@ fn row_to_installed(row: &rusqlite::Row) -> rusqlite::Result<InstalledResource> 
         installed_at: row.get(6)?,
         vps_updated_at: row.get(7)?,
         metadata: row.get(8)?,
+        authors: vec![], // populated separately
     })
 }
 
@@ -317,6 +440,7 @@ pub struct InstalledResource {
     pub installed_at: Option<String>,
     pub vps_updated_at: Option<i64>,
     pub metadata: Option<String>,
+    pub authors: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -378,10 +502,11 @@ mod tests {
             game_name: "Test Game".to_string(),
             resource_type: "tables".to_string(),
             version: Some("1.0".to_string()),
-            file_path: "/path/to/file.vpx".to_string(),
+            file_path: format!("/path/to/{id}.vpx"),
             installed_at: None,
             vps_updated_at: Some(1745823539995),
             metadata: None,
+            authors: vec![],
         }
     }
 
@@ -417,6 +542,34 @@ mod tests {
         let fetched = db.get_installed("r1").unwrap().unwrap();
         assert_eq!(fetched.version.as_deref(), Some("2.0"));
         assert_eq!(db.count_installed().unwrap(), 1);
+    }
+
+    #[test]
+    fn upsert_deduplicates_by_file_path() {
+        let db = test_db();
+
+        // First import with one ID
+        let mut res1 = sample_resource("old-id", "g1");
+        res1.file_path = "/tables/hook.vpx".to_string();
+        res1.version = Some("1.0".to_string());
+        db.upsert_installed(&res1).unwrap();
+
+        // Re-import same file with different ID (e.g., VPS resource ID found)
+        let mut res2 = sample_resource("vps-resource-id", "g1");
+        res2.file_path = "/tables/hook.vpx".to_string();
+        res2.version = Some("2.0".to_string());
+        db.upsert_installed(&res2).unwrap();
+
+        // Should have one entry, not two
+        assert_eq!(db.count_installed().unwrap(), 1);
+
+        // Old ID should be gone
+        assert!(db.get_installed("old-id").unwrap().is_none());
+
+        // New ID should exist with updated metadata
+        let fetched = db.get_installed("vps-resource-id").unwrap().unwrap();
+        assert_eq!(fetched.version.as_deref(), Some("2.0"));
+        assert_eq!(fetched.file_path, "/tables/hook.vpx");
     }
 
     #[test]
@@ -507,5 +660,88 @@ mod tests {
 
         assert_eq!(db1.count_installed().unwrap(), 1);
         assert_eq!(db2.count_installed().unwrap(), 0);
+    }
+
+    #[test]
+    fn upsert_with_authors() {
+        let db = test_db();
+        let mut res = sample_resource("r1", "g1");
+        res.authors = vec!["Author A".to_string(), "Author B".to_string()];
+        db.upsert_installed(&res).unwrap();
+
+        let fetched = db.get_installed("r1").unwrap().unwrap();
+        assert_eq!(fetched.authors, vec!["Author A", "Author B"]);
+    }
+
+    #[test]
+    fn upsert_replaces_authors() {
+        let db = test_db();
+        let mut res = sample_resource("r1", "g1");
+        res.authors = vec!["Author A".to_string()];
+        db.upsert_installed(&res).unwrap();
+
+        res.authors = vec!["Author B".to_string(), "Author C".to_string()];
+        db.upsert_installed(&res).unwrap();
+
+        let fetched = db.get_installed("r1").unwrap().unwrap();
+        assert_eq!(fetched.authors, vec!["Author B", "Author C"]);
+    }
+
+    #[test]
+    fn authors_shared_across_resources() {
+        let db = test_db();
+        let mut r1 = sample_resource("r1", "g1");
+        r1.authors = vec!["Shared Author".to_string(), "Unique A".to_string()];
+        db.upsert_installed(&r1).unwrap();
+
+        let mut r2 = sample_resource("r2", "g2");
+        r2.authors = vec!["Shared Author".to_string(), "Unique B".to_string()];
+        db.upsert_installed(&r2).unwrap();
+
+        let all_authors = db.list_authors().unwrap();
+        assert_eq!(all_authors, vec!["Shared Author", "Unique A", "Unique B"]);
+    }
+
+    #[test]
+    fn find_by_author() {
+        let db = test_db();
+        let mut r1 = sample_resource("r1", "g1");
+        r1.authors = vec!["JPSalas".to_string()];
+        db.upsert_installed(&r1).unwrap();
+
+        let mut r2 = sample_resource("r2", "g2");
+        r2.authors = vec!["Other Author".to_string()];
+        db.upsert_installed(&r2).unwrap();
+
+        let results = db.find_by_author("jpsal").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "r1");
+        assert_eq!(results[0].authors, vec!["JPSalas"]);
+    }
+
+    #[test]
+    fn remove_cleans_up_author_associations() {
+        let db = test_db();
+        let mut res = sample_resource("r1", "g1");
+        res.authors = vec!["Author A".to_string()];
+        db.upsert_installed(&res).unwrap();
+
+        db.remove_installed("r1").unwrap();
+
+        // Author still exists in the authors table (shared resource)
+        // but the association is gone
+        let results = db.find_by_author("Author A").unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn list_installed_includes_authors() {
+        let db = test_db();
+        let mut res = sample_resource("r1", "g1");
+        res.authors = vec!["Author X".to_string()];
+        db.upsert_installed(&res).unwrap();
+
+        let all = db.list_installed(None).unwrap();
+        assert_eq!(all[0].authors, vec!["Author X"]);
     }
 }
