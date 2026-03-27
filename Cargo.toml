@@ -19,4 +19,7 @@ clap = { version = "4", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
 directories = "6"
 toml = "0.8"
+zip = "2"
+sevenz-rust2 = "0.13"
+unrar = "0.5"
 vpin-manager-core = { path = "crates/vpin-manager-core" }
