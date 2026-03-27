@@ -93,39 +93,53 @@ pub fn match_files<'a>(
         .map(|g| (g, normalize(&g.name)))
         .collect();
 
-    // Build a ROM identifier -> Game lookup from VPS DB romFiles.
-    let rom_games: std::collections::HashMap<String, &Game> = games
-        .iter()
-        .flat_map(|g| {
-            let from_version = g.rom_files
-                .iter()
-                .filter_map(|r| r.version.as_ref())
-                .map(move |rom| (rom.to_lowercase(), g));
-            let from_name = g.rom_files
-                .iter()
-                .filter_map(|r| r.name.as_ref())
-                .map(move |rom| (rom.to_lowercase(), g));
-            from_version.chain(from_name)
-        })
-        .collect();
+    // Build a ROM identifier -> list of Games lookup from VPS DB romFiles.
+    // Multiple games can share the same ROM (e.g., original vs. JP's retheme).
+    let mut rom_games_multi: std::collections::HashMap<String, Vec<&Game>> =
+        std::collections::HashMap::new();
+    for g in games {
+        for r in &g.rom_files {
+            if let Some(ref v) = r.version {
+                rom_games_multi
+                    .entry(v.to_lowercase())
+                    .or_default()
+                    .push(g);
+            }
+            if let Some(ref n) = r.name {
+                rom_games_multi
+                    .entry(n.to_lowercase())
+                    .or_default()
+                    .push(g);
+            }
+        }
+    }
 
     // Also collect ROM names from VPX metadata we've already read.
-    let vpx_rom_games: std::collections::HashMap<String, &Game> = files
-        .iter()
-        .filter_map(|f| {
-            let rom = f.vpx_metadata.as_ref()?.rom_name.as_ref()?;
-            let normalized = normalize(&f.stem);
-            let (game, _) = find_best_match(&normalized, &normalized_games)?;
-            Some((rom.to_lowercase(), game))
-        })
-        .collect();
+    let mut vpx_rom_games: std::collections::HashMap<String, Vec<&Game>> =
+        std::collections::HashMap::new();
+    for f in files {
+        if let Some(meta) = f.vpx_metadata.as_ref() {
+            if let Some(rom) = meta.rom_name.as_ref() {
+                let normalized = normalize(&f.stem);
+                let author = meta.author_name.as_deref();
+                if let Some((game, _)) =
+                    find_best_match_with_author(&normalized, &normalized_games, author)
+                {
+                    vpx_rom_games
+                        .entry(rom.to_lowercase())
+                        .or_default()
+                        .push(game);
+                }
+            }
+        }
+    }
 
     let mut matches = Vec::new();
     let mut unmatched = Vec::new();
 
     for file in files {
         // Try VPX metadata first (most accurate)
-        if let Some(result) = try_vpx_metadata_match(file, &normalized_games, &rom_games) {
+        if let Some(result) = try_vpx_metadata_match(file, &normalized_games, &rom_games_multi) {
             matches.push(result);
             continue;
         }
@@ -134,7 +148,10 @@ pub fn match_files<'a>(
         if let Some(ref meta) = file.b2s_metadata {
             if let Some(ref game_name) = meta.game_name {
                 let lower = game_name.to_lowercase();
-                if let Some(&game) = rom_games.get(&lower).or_else(|| vpx_rom_games.get(&lower)) {
+                let b2s_author = meta.author.as_deref();
+                if let Some(game) = resolve_rom_game(&rom_games_multi, &lower, b2s_author)
+                    .or_else(|| resolve_rom_game(&vpx_rom_games, &lower, b2s_author))
+                {
                     let matched_resource = find_matching_b2s_file(file, game);
                     matches.push(MatchResult {
                         file,
@@ -151,7 +168,9 @@ pub fn match_files<'a>(
         // For ROM files, try matching stem against known ROM identifiers
         if file.resource_type == ResourceType::Roms {
             let lower_stem = file.stem.to_lowercase();
-            if let Some(&game) = rom_games.get(&lower_stem).or_else(|| vpx_rom_games.get(&lower_stem)) {
+            if let Some(game) = resolve_rom_game(&rom_games_multi, &lower_stem, None)
+                .or_else(|| resolve_rom_game(&vpx_rom_games, &lower_stem, None))
+            {
                 let matched_resource = find_matching_rom_file(file, game);
                 matches.push(MatchResult {
                     file,
@@ -166,8 +185,13 @@ pub fn match_files<'a>(
 
         // Fall back to filename-based matching
         let normalized_stem = normalize(&file.stem);
+        let file_author = file
+            .vpx_metadata
+            .as_ref()
+            .and_then(|m| m.author_name.as_deref())
+            .or_else(|| file.b2s_metadata.as_ref().and_then(|m| m.author.as_deref()));
 
-        if let Some((game, score)) = find_best_match(&normalized_stem, &normalized_games) {
+        if let Some((game, score)) = find_best_match_with_author(&normalized_stem, &normalized_games, file_author) {
             let confidence = if score >= 0.95 {
                 Confidence::High
             } else if score >= 0.7 {
@@ -203,13 +227,13 @@ pub fn match_files<'a>(
 fn try_vpx_metadata_match<'a>(
     file: &'a ScannedFile,
     normalized_games: &[(&'a Game, String)],
-    rom_games: &std::collections::HashMap<String, &'a Game>,
+    rom_games: &std::collections::HashMap<String, Vec<&'a Game>>,
 ) -> Option<MatchResult<'a>> {
     let meta = file.vpx_metadata.as_ref()?;
 
     // Try ROM name match first (most precise)
     if let Some(ref rom) = meta.rom_name {
-        if let Some(&game) = rom_games.get(&rom.to_lowercase()) {
+        if let Some(game) = resolve_rom_game(rom_games, &rom.to_lowercase(), meta.author_name.as_deref()) {
             let matched_resource = find_matching_table_file(file, game);
             return Some(MatchResult {
                 file,
@@ -225,7 +249,8 @@ fn try_vpx_metadata_match<'a>(
     if let Some(ref table_name) = meta.table_name {
         let normalized = normalize(table_name);
         if !normalized.is_empty() {
-            if let Some((game, score)) = find_best_match(&normalized, normalized_games) {
+            let author = meta.author_name.as_deref();
+            if let Some((game, score)) = find_best_match_with_author(&normalized, normalized_games, author) {
                 let confidence = if score >= 0.9 {
                     Confidence::High
                 } else if score >= 0.65 {
@@ -368,17 +393,57 @@ fn find_matching_rom_file<'a>(
 
 // --- Matching helpers ---
 
+/// Pick the best game from a ROM lookup, using author to disambiguate
+/// when multiple games share the same ROM.
+fn resolve_rom_game<'a>(
+    rom_map: &std::collections::HashMap<String, Vec<&'a Game>>,
+    rom_key: &str,
+    author: Option<&str>,
+) -> Option<&'a Game> {
+    let candidates = rom_map.get(rom_key)?;
+    if candidates.len() == 1 {
+        return Some(candidates[0]);
+    }
+    // If we have author info, prefer the game that has a resource by this author
+    if let Some(author) = author {
+        for &game in candidates {
+            if game_has_matching_author(game, author) {
+                return Some(game);
+            }
+        }
+    }
+    // Fall back to first candidate
+    Some(candidates[0])
+}
+
 /// Find the best matching game for a normalized file stem.
+/// When `file_author` is provided, games whose resources list that author
+/// get a score bonus to break ties between similarly-named games.
 fn find_best_match<'a>(
     stem: &str,
     games: &[(&'a Game, String)],
 ) -> Option<(&'a Game, f64)> {
+    find_best_match_with_author(stem, games, None)
+}
+
+fn find_best_match_with_author<'a>(
+    stem: &str,
+    games: &[(&'a Game, String)],
+    file_author: Option<&str>,
+) -> Option<(&'a Game, f64)> {
     let mut best: Option<(&Game, f64)> = None;
 
     for (game, normalized_name) in games {
-        let score = similarity(stem, normalized_name);
+        let mut score = similarity(stem, normalized_name);
 
         if score >= 0.5 {
+            // Boost score if author matches any resource in this game
+            if let Some(author) = file_author {
+                if game_has_matching_author(game, author) {
+                    score += 0.1;
+                }
+            }
+
             if best.is_none() || score > best.unwrap().1 {
                 best = Some((game, score));
             }
@@ -386,6 +451,21 @@ fn find_best_match<'a>(
     }
 
     best
+}
+
+/// Check if any resource in a game lists the given author.
+fn game_has_matching_author(game: &Game, author: &str) -> bool {
+    let lower = author.to_lowercase();
+    let check = |authors: &[String]| {
+        authors.iter().any(|a| {
+            let a_lower = a.to_lowercase();
+            a_lower.contains(&lower) || lower.contains(&a_lower)
+        })
+    };
+
+    game.table_files.iter().any(|r| check(&r.authors))
+        || game.b2s_files.iter().any(|r| check(&r.authors))
+        || game.rom_files.iter().any(|r| check(&r.authors))
 }
 
 /// Normalize a name for comparison.
