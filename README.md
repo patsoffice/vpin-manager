@@ -4,11 +4,12 @@ A virtual pinball resource library manager. Browse, search, download, import, an
 
 ## Features
 
-- **Browse & Search** -- Query the VPS database (~2,500 games) by name, manufacturer, year, type, and table format
-- **Library Management** -- Track installed resources, check for updates against the VPS database
+- **Browse & Search** -- Query the VPS database (~2,500 games) by name, manufacturer, year, type, table format, and author
+- **Library Management** -- Track installed resources across multiple named libraries, check for updates against the VPS database
 - **Import** -- Scan existing directories for virtual pinball files, fuzzy-match them to VPS entries, and register them in your library
-- **File Organization** -- Move and organize files into platform-specific folder structures with built-in presets for VPX and VPX-standalone, plus custom profiles
-- **Archive Extraction** -- Extract ZIP, 7z, and RAR archives natively
+- **File Organization** -- Move or copy files into platform-specific folder structures with built-in presets for VPX and VPX-standalone, plus custom profiles
+- **Archive Extraction** -- Extract ZIP, 7z, and RAR archives natively (pure Rust)
+- **VPinMediaDB** -- Download high-resolution media assets (images, videos, audio) keyed by VPS game ID (planned)
 - **Authenticated Downloads** -- Store credentials for VPUniverse and VPForums to automate downloads (planned)
 - **Web UI** -- HTMX-based local web interface for browsing and managing your library (planned)
 
@@ -116,17 +117,62 @@ vpin-manager config --path
 vpin-manager config --init
 ```
 
+### Import existing files
+
+Scan a directory for virtual pinball files, fuzzy-match them against the VPS database, and register them in your library. Files are not moved -- only tracked.
+
+```sh
+# Scan and import (prompts for confirmation)
+vpin-manager import ~/VPinball/Tables
+
+# Auto-confirm all matches
+vpin-manager import ~/VPinball/Tables -y
+
+# Only import high-confidence matches
+vpin-manager import ~/VPinball/Tables --high-only -y
+
+# Import into a named library
+vpin-manager import ~/VPinball/Tables --library my-cabinet
+```
+
+Supported file types: `.vpx`, `.vpt`, `.fpt` (tables), `.directb2s` (backglasses), `.pov`, `.pal`/`.vni`/`.cRZ` (alt color), `.mp3`/`.wav`/`.ogg` (sound), plus archives in context-appropriate directories (ZIPs in `roms/`, etc.).
+
+### Library management
+
+```sh
+# List all installed resources
+vpin-manager library
+
+# Check for updates against the VPS database
+vpin-manager library status
+
+# Use a named library
+vpin-manager library --library my-cabinet
+```
+
+### Organize files
+
+Move or copy files into the active export profile's folder structure.
+
+```sh
+# Move files into the configured directory layout
+vpin-manager organize ~/Downloads/tables
+
+# Copy instead of move
+vpin-manager organize ~/Downloads/tables --copy
+
+# Create game-name subdirectories (e.g., Tables/Hook/hook.vpx)
+vpin-manager organize ~/Downloads/tables --game-dirs
+```
+
 ### Coming soon
 
 ```sh
-# Import existing files into your library (planned)
-vpin-manager import ~/VPinball/Tables
+# Download media from VPinMediaDB (planned)
+vpin-manager media <game-id>
 
-# List installed resources (planned)
-vpin-manager library
-
-# Check for updates (planned)
-vpin-manager library status
+# Authenticated downloads from VPUniverse/VPForums (planned)
+# HTMX web UI (planned)
 ```
 
 ## Export Profiles
@@ -155,10 +201,21 @@ pupvideos/           # PuP packs
 
 Custom profiles can be created and saved in the configuration file.
 
+## Data Storage
+
+On macOS, vpin-manager stores its data in standard platform directories:
+
+- **Config**: `~/Library/Application Support/vpin-manager/config.toml`
+- **VPS DB cache**: `~/Library/Caches/vpin-manager/vpsdb.json`
+- **Library databases**: `~/Library/Application Support/vpin-manager/<name>.db`
+
+Override the data directory with `--data-dir` on any command. Multiple named libraries are supported via `--library <name>`.
+
 ## Data Sources
 
 - Game and resource metadata: [VPS Database](https://virtualpinballspreadsheet.github.io/vps-db/db/vpsdb.json)
 - Database freshness: [lastUpdated.json](https://virtualpinballspreadsheet.github.io/vps-db/lastUpdated.json)
+- Media assets: [VPinMediaDB](https://github.com/superhac/vpinmediadb) (planned)
 
 ## License
 

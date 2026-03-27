@@ -1,10 +1,15 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process;
 
 use clap::{Parser, Subcommand};
 
-use vpin_manager_core::config::AppConfig;
+use vpin_manager_core::config::{AppConfig, ResourceType};
+use vpin_manager_core::files::organizer::{self, FileAction};
+use vpin_manager_core::library::db::{InstalledResource, LibraryDb};
+use vpin_manager_core::library::importer::{self, Confidence};
+use vpin_manager_core::library::scanner;
 use vpin_manager_core::vpsdb::fetch::{self, SyncResult, VpsDb};
+use vpin_manager_core::vpsdb::models::Game;
 use vpin_manager_core::vpsdb::search::{self, SearchQuery, SortOrder};
 
 #[derive(Parser)]
@@ -77,6 +82,58 @@ enum Command {
         #[arg(long)]
         init: bool,
     },
+
+    /// Scan a directory, match files to VPS games, and register in library
+    Import {
+        /// Directory to scan
+        dir: PathBuf,
+
+        /// Only show high-confidence matches
+        #[arg(long)]
+        high_only: bool,
+
+        /// Automatically confirm all matches (skip review)
+        #[arg(long, short = 'y')]
+        yes: bool,
+
+        /// Library name
+        #[arg(long, default_value = "default")]
+        library: String,
+    },
+
+    /// List installed resources or check for updates
+    Library {
+        #[command(subcommand)]
+        action: Option<LibraryAction>,
+
+        /// Library name
+        #[arg(long, default_value = "default")]
+        library: String,
+    },
+
+    /// Move files into the configured folder structure
+    Organize {
+        /// Directory to scan for files to organize
+        dir: PathBuf,
+
+        /// Copy instead of move
+        #[arg(long)]
+        copy: bool,
+
+        /// Create game-name subdirectories
+        #[arg(long)]
+        game_dirs: bool,
+
+        /// Library name (used to look up game names for matched files)
+        #[arg(long, default_value = "default")]
+        library: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum LibraryAction {
+    /// Check for updates against the VPS database
+    Status,
 }
 
 #[tokio::main]
@@ -118,8 +175,23 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         Command::Show { game } => cmd_show(&cache_dir, &game),
         Command::Config { path, init } => cmd_config(path, init),
+        Command::Import {
+            dir,
+            high_only,
+            yes,
+            library,
+        } => cmd_import(&cache_dir, &dir, high_only, yes, &library),
+        Command::Library { action, library } => cmd_library(&cache_dir, action, &library),
+        Command::Organize {
+            dir,
+            copy,
+            game_dirs,
+            library,
+        } => cmd_organize(&dir, copy, game_dirs, &library),
     }
 }
+
+// --- Sync ---
 
 async fn cmd_sync(
     cache_dir: &PathBuf,
@@ -145,6 +217,8 @@ async fn cmd_sync(
 
     Ok(())
 }
+
+// --- Search ---
 
 fn cmd_search(
     cache_dir: &PathBuf,
@@ -173,7 +247,6 @@ fn cmd_search(
         }
     );
 
-    // Column widths
     let id_w = 12;
     let name_w = 35;
     let mfr_w = 15;
@@ -204,6 +277,8 @@ fn cmd_search(
     Ok(())
 }
 
+// --- Show ---
+
 fn cmd_show(
     cache_dir: &PathBuf,
     game_query: &str,
@@ -211,25 +286,9 @@ fn cmd_show(
     let vpsdb = VpsDb::new(cache_dir.clone());
     let games = vpsdb.load_cached()?;
 
-    // Try exact ID match first, then substring name match
-    let game = games
-        .iter()
-        .find(|g| g.id == game_query)
-        .or_else(|| {
-            let lower = game_query.to_lowercase();
-            let matches: Vec<_> = games
-                .iter()
-                .filter(|g| g.name.to_lowercase().contains(&lower))
-                .collect();
-            if matches.len() == 1 {
-                Some(matches[0])
-            } else {
-                None
-            }
-        });
+    let game = find_game(&games, game_query);
 
     let Some(game) = game else {
-        // Check if multiple name matches
         let lower = game_query.to_lowercase();
         let matches: Vec<_> = games
             .iter()
@@ -252,7 +311,6 @@ fn cmd_show(
         return Ok(());
     };
 
-    // Header
     println!("{}", game.name);
     println!("{}", "=".repeat(game.name.len()));
     if let Some(ref mfr) = game.manufacturer {
@@ -284,7 +342,6 @@ fn cmd_show(
     }
     println!();
 
-    // Resources
     print_table_files(&game.table_files);
     print_resource_section("Backglasses", &game.b2s_files, |r| {
         format_features(&r.features)
@@ -306,6 +363,434 @@ fn cmd_show(
     print_simple_section("Sound", &game.sound_files);
 
     Ok(())
+}
+
+// --- Config ---
+
+fn cmd_config(show_path: bool, init: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let config_path = AppConfig::default_path()
+        .ok_or("could not determine config directory")?;
+
+    if show_path {
+        println!("{}", config_path.display());
+        return Ok(());
+    }
+
+    if init {
+        if config_path.exists() {
+            println!("Config file already exists at {}", config_path.display());
+        } else {
+            let config = AppConfig::default();
+            config.save(&config_path)?;
+            println!("Created default config at {}", config_path.display());
+        }
+        return Ok(());
+    }
+
+    let config = AppConfig::load(&config_path)?;
+    println!("Config file: {}", config_path.display());
+    println!("Active profile: {}", config.active_profile);
+    println!("Web port: {}", config.web_port);
+    println!();
+
+    for profile in &config.profiles {
+        println!("Profile: {}", profile.name);
+        println!("  Base directory: {}", profile.base_dir.display());
+        for rt in ResourceType::ALL {
+            if let Some(rel) = profile.mappings.get(rt) {
+                println!("  {rt}: {}", rel.display());
+            }
+        }
+        println!();
+    }
+
+    Ok(())
+}
+
+// --- Import ---
+
+fn cmd_import(
+    cache_dir: &PathBuf,
+    dir: &Path,
+    high_only: bool,
+    auto_confirm: bool,
+    library_name: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+
+    if !dir.exists() {
+        return Err(format!("directory not found: {}", dir.display()).into());
+    }
+
+    // Load VPS database
+    let vpsdb = VpsDb::new(cache_dir.clone());
+    let games = vpsdb.load_cached()?;
+
+    // Scan directory
+    println!("Scanning {}...", dir.display());
+    let scan = scanner::scan_directory(dir);
+
+    if scan.files.is_empty() {
+        println!("No virtual pinball files found.");
+        return Ok(());
+    }
+
+    println!("Found {} files:", scan.files.len());
+    for (rt, count) in scan.summary() {
+        println!("  {rt}: {count}");
+    }
+    println!();
+
+    if !scan.errors.is_empty() {
+        println!("{} scan errors (skipped):", scan.errors.len());
+        for (path, err) in &scan.errors {
+            println!("  {}: {err}", path.display());
+        }
+        println!();
+    }
+
+    // Match against VPS database
+    println!("Matching against VPS database ({} games)...", games.len());
+    let results = importer::match_files(&scan.files, &games);
+
+    let matches: Vec<_> = if high_only {
+        results
+            .matches
+            .into_iter()
+            .filter(|m| m.confidence == Confidence::High)
+            .collect()
+    } else {
+        results.matches
+    };
+
+    if matches.is_empty() {
+        println!("No matches found.");
+        return Ok(());
+    }
+
+    // Display matches
+    println!(
+        "\n{} match{}:\n",
+        matches.len(),
+        if matches.len() == 1 { "" } else { "es" }
+    );
+
+    let name_w = 30;
+    let game_w = 30;
+    let conf_w = 6;
+
+    println!(
+        "  {:<name_w$}  {:<game_w$}  {:<conf_w$}  Type",
+        "File", "Game", "Conf.",
+    );
+    println!(
+        "  {:<name_w$}  {:<game_w$}  {:<conf_w$}  ----",
+        "----", "----", "-----",
+    );
+
+    for m in &matches {
+        let file_name = truncate(
+            m.file.path.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
+            name_w,
+        );
+        let game_name = truncate(&m.game.name, game_w);
+        println!(
+            "  {file_name:<name_w$}  {game_name:<game_w$}  {:<conf_w$}  {}",
+            m.confidence.to_string(),
+            m.file.resource_type,
+        );
+    }
+
+    if !results.unmatched.is_empty() {
+        println!("\n{} unmatched files:", results.unmatched.len());
+        for u in &results.unmatched {
+            println!(
+                "  {} ({})",
+                u.file.path.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
+                u.file.resource_type,
+            );
+        }
+    }
+
+    // Confirm
+    if !auto_confirm {
+        println!("\nRegister {} matches in library '{library_name}'? [y/N] ", matches.len());
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        if !input.trim().eq_ignore_ascii_case("y") {
+            println!("Cancelled.");
+            return Ok(());
+        }
+    }
+
+    // Register in library
+    let db_path = LibraryDb::default_path(library_name)
+        .ok_or("could not determine library path")?;
+    let db = LibraryDb::open(&db_path)?;
+
+    let mut registered = 0;
+    for m in &matches {
+        let resource = InstalledResource {
+            id: format!(
+                "import-{}-{}",
+                m.game.id,
+                m.file
+                    .path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown")
+            ),
+            game_id: m.game.id.clone(),
+            game_name: m.game.name.clone(),
+            resource_type: m.file.resource_type.to_string().to_lowercase(),
+            version: None,
+            file_path: m.file.path.to_string_lossy().to_string(),
+            installed_at: None,
+            vps_updated_at: m.game.updated_at,
+            metadata: Some(format!("{{\"confidence\":\"{}\",\"score\":{:.2}}}", m.confidence, m.score)),
+        };
+        db.upsert_installed(&resource)?;
+        registered += 1;
+    }
+
+    println!("Registered {registered} resources in library '{library_name}'.");
+    Ok(())
+}
+
+// --- Library ---
+
+fn cmd_library(
+    cache_dir: &PathBuf,
+    action: Option<LibraryAction>,
+    library_name: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let db_path = LibraryDb::default_path(library_name)
+        .ok_or("could not determine library path")?;
+
+    if !db_path.exists() {
+        println!("Library '{library_name}' is empty. Use 'vpin-manager import' to add resources.");
+        return Ok(());
+    }
+
+    let db = LibraryDb::open(&db_path)?;
+
+    match action {
+        Some(LibraryAction::Status) => cmd_library_status(cache_dir, &db, library_name),
+        None => cmd_library_list(&db, library_name),
+    }
+}
+
+fn cmd_library_list(
+    db: &LibraryDb,
+    library_name: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let resources = db.list_installed(None)?;
+
+    if resources.is_empty() {
+        println!("Library '{library_name}' is empty.");
+        return Ok(());
+    }
+
+    let count = resources.len();
+    let game_ids = db.installed_game_ids()?;
+
+    println!(
+        "Library '{library_name}': {count} resources across {} games\n",
+        game_ids.len()
+    );
+
+    let name_w = 30;
+    let type_w = 12;
+    let ver_w = 8;
+
+    println!(
+        "{:<name_w$}  {:<type_w$}  {:<ver_w$}  Path",
+        "Game", "Type", "Version",
+    );
+    println!(
+        "{:<name_w$}  {:<type_w$}  {:<ver_w$}  ----",
+        "----", "----", "-------",
+    );
+
+    for r in &resources {
+        let name = truncate(&r.game_name, name_w);
+        let rtype = truncate(&r.resource_type, type_w);
+        let ver = truncate(r.version.as_deref().unwrap_or("-"), ver_w);
+        let path = &r.file_path;
+        println!("{name:<name_w$}  {rtype:<type_w$}  {ver:<ver_w$}  {path}");
+    }
+
+    Ok(())
+}
+
+fn cmd_library_status(
+    cache_dir: &PathBuf,
+    db: &LibraryDb,
+    library_name: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let vpsdb = VpsDb::new(cache_dir.clone());
+    let games = vpsdb.load_cached()?;
+
+    let resources = db.list_installed(None)?;
+
+    if resources.is_empty() {
+        println!("Library '{library_name}' is empty.");
+        return Ok(());
+    }
+
+    // Build a lookup of game_id -> game
+    let game_map: std::collections::HashMap<&str, &Game> =
+        games.iter().map(|g| (g.id.as_str(), g)).collect();
+
+    let mut updates_available = 0;
+    let mut up_to_date = 0;
+    let mut unknown = 0;
+
+    println!("Checking {} resources for updates...\n", resources.len());
+
+    for r in &resources {
+        if let Some(game) = game_map.get(r.game_id.as_str()) {
+            let installed_ts = r.vps_updated_at.unwrap_or(0);
+            let current_ts = game.updated_at.unwrap_or(0);
+
+            if current_ts > installed_ts {
+                updates_available += 1;
+                println!(
+                    "  UPDATE: {} ({}) - installed: {}, latest: {}",
+                    r.game_name,
+                    r.resource_type,
+                    format_timestamp(installed_ts),
+                    format_timestamp(current_ts),
+                );
+            } else {
+                up_to_date += 1;
+            }
+        } else {
+            unknown += 1;
+        }
+    }
+
+    println!();
+    println!("{up_to_date} up to date, {updates_available} updates available, {unknown} not found in VPS DB");
+
+    Ok(())
+}
+
+// --- Organize ---
+
+fn cmd_organize(
+    dir: &PathBuf,
+    copy: bool,
+    game_dirs: bool,
+    library_name: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+
+    if !dir.exists() {
+        return Err(format!("directory not found: {}", dir.display()).into());
+    }
+
+    let config_path = AppConfig::default_path()
+        .ok_or("could not determine config directory")?;
+    let config = AppConfig::load(&config_path)?;
+    let profile = config
+        .active_profile()
+        .ok_or_else(|| format!("active profile '{}' not found in config", config.active_profile))?;
+
+    // Scan directory
+    println!("Scanning {}...", dir.display());
+    let scan = scanner::scan_directory(dir);
+
+    if scan.files.is_empty() {
+        println!("No virtual pinball files found.");
+        return Ok(());
+    }
+
+    println!("Found {} files.", scan.files.len());
+
+    // Try to load library for game name lookup
+    let db = LibraryDb::default_path(library_name)
+        .filter(|p| p.exists())
+        .and_then(|p| LibraryDb::open(&p).ok());
+
+    let action = if copy {
+        FileAction::Copy
+    } else {
+        FileAction::Move
+    };
+
+    let action_verb = if copy { "Copying" } else { "Moving" };
+
+    let mut success = 0;
+    let mut errors = 0;
+
+    for file in &scan.files {
+        // Look up game name from library if available and game_dirs requested
+        let game_name = if game_dirs {
+            lookup_game_name(&db, &file.path)
+        } else {
+            None
+        };
+
+        match organizer::organize_file(
+            &file.path,
+            profile,
+            file.resource_type,
+            game_name.as_deref(),
+            action,
+            false,
+        ) {
+            Ok(result) => {
+                println!(
+                    "  {action_verb} {} -> {}",
+                    result.source.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
+                    result.destination.display(),
+                );
+                success += 1;
+            }
+            Err(e) => {
+                eprintln!(
+                    "  ERROR {}: {e}",
+                    file.path.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
+                );
+                errors += 1;
+            }
+        }
+    }
+
+    println!("\n{success} files organized, {errors} errors.");
+    Ok(())
+}
+
+fn lookup_game_name(db: &Option<LibraryDb>, file_path: &Path) -> Option<String> {
+
+    let db = db.as_ref()?;
+    let file_str = file_path.to_string_lossy();
+
+    // Search installed resources for a matching file path
+    let resources = db.list_installed(None).ok()?;
+    resources
+        .iter()
+        .find(|r| r.file_path == file_str.as_ref())
+        .map(|r| r.game_name.clone())
+}
+
+// --- Display helpers ---
+
+fn find_game<'a>(games: &'a [Game], query: &str) -> Option<&'a Game> {
+    games
+        .iter()
+        .find(|g| g.id == query)
+        .or_else(|| {
+            let lower = query.to_lowercase();
+            let matches: Vec<_> = games
+                .iter()
+                .filter(|g| g.name.to_lowercase().contains(&lower))
+                .collect();
+            if matches.len() == 1 {
+                Some(matches[0])
+            } else {
+                None
+            }
+        })
 }
 
 fn print_table_files(tables: &[vpin_manager_core::vpsdb::models::TableFile]) {
@@ -386,49 +871,6 @@ fn print_tutorial_section(tutorials: &[vpin_manager_core::vpsdb::models::Tutoria
     println!();
 }
 
-fn cmd_config(show_path: bool, init: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let config_path = AppConfig::default_path()
-        .ok_or("could not determine config directory")?;
-
-    if show_path {
-        println!("{}", config_path.display());
-        return Ok(());
-    }
-
-    if init {
-        if config_path.exists() {
-            println!("Config file already exists at {}", config_path.display());
-        } else {
-            let config = AppConfig::default();
-            config.save(&config_path)?;
-            println!("Created default config at {}", config_path.display());
-        }
-        return Ok(());
-    }
-
-    // Default: show current config
-    let config = AppConfig::load(&config_path)?;
-    println!("Config file: {}", config_path.display());
-    println!("Active profile: {}", config.active_profile);
-    println!("Web port: {}", config.web_port);
-    println!();
-
-    for profile in &config.profiles {
-        println!("Profile: {}", profile.name);
-        println!("  Base directory: {}", profile.base_dir.display());
-        for rt in vpin_manager_core::config::ResourceType::ALL {
-            if let Some(rel) = profile.mappings.get(rt) {
-                println!("  {rt}: {}", rel.display());
-            }
-        }
-        println!();
-    }
-
-    Ok(())
-}
-
-// --- Helpers ---
-
 fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
@@ -441,17 +883,28 @@ fn format_features(features: &[String]) -> String {
     features.join(", ")
 }
 
+fn format_timestamp(ts: i64) -> String {
+    if ts == 0 {
+        return "unknown".to_string();
+    }
+    let secs = ts / 1000;
+    chrono::DateTime::from_timestamp(secs, 0)
+        .map(|dt| dt.format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|| "invalid".to_string())
+}
+
 fn parse_sort_order(s: &str) -> Result<SortOrder, Box<dyn std::error::Error>> {
     match s.to_lowercase().as_str() {
         "name" => Ok(SortOrder::Name),
         "year" => Ok(SortOrder::Year),
         "manufacturer" | "mfr" => Ok(SortOrder::Manufacturer),
         "updated" | "last_updated" => Ok(SortOrder::LastUpdated),
-        _ => Err(format!("unknown sort order '{s}', expected: name, year, manufacturer, updated").into()),
+        _ => Err(
+            format!("unknown sort order '{s}', expected: name, year, manufacturer, updated").into(),
+        ),
     }
 }
 
-/// Trait to abstract over resource file types for display.
 trait HasResourceFields {
     fn version(&self) -> Option<&str>;
     fn authors(&self) -> &[String];
