@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::b2s::B2sMetadata;
 use crate::config::ResourceType;
 use crate::vpx::VpxMetadata;
 
@@ -15,6 +16,8 @@ pub struct ScannedFile {
     pub size: u64,
     /// Metadata extracted from VPX files (table name, author, ROM, etc.).
     pub vpx_metadata: Option<VpxMetadata>,
+    /// Metadata extracted from .directb2s backglass files.
+    pub b2s_metadata: Option<B2sMetadata>,
 }
 
 /// Results of a directory scan.
@@ -135,12 +138,20 @@ fn classify_file(path: &Path) -> Option<ScannedFile> {
         None
     };
 
+    // Read B2S metadata for .directb2s files
+    let b2s_metadata = if extension.eq_ignore_ascii_case("directb2s") {
+        crate::b2s::read_b2s_metadata(path).ok()
+    } else {
+        None
+    };
+
     Some(ScannedFile {
         path: path.to_path_buf(),
         resource_type,
         stem: final_stem,
         size,
         vpx_metadata,
+        b2s_metadata,
     })
 }
 

@@ -92,6 +92,22 @@ pub fn match_files<'a>(
             continue;
         }
 
+        // Try B2S metadata — game_name is a ROM identifier
+        if let Some(ref meta) = file.b2s_metadata {
+            if let Some(ref game_name) = meta.game_name {
+                let lower = game_name.to_lowercase();
+                if let Some(&game) = rom_games.get(&lower).or_else(|| vpx_rom_games.get(&lower)) {
+                    matches.push(MatchResult {
+                        file,
+                        game,
+                        confidence: Confidence::High,
+                        score: 1.0,
+                    });
+                    continue;
+                }
+            }
+        }
+
         // For ROM files, try matching stem against known ROM identifiers
         if file.resource_type == crate::config::ResourceType::Roms {
             let lower_stem = file.stem.to_lowercase();
@@ -313,6 +329,7 @@ mod tests {
             stem: stem.to_string(),
             size: 1000,
             vpx_metadata: None,
+            b2s_metadata: None,
         }
     }
 
@@ -497,6 +514,7 @@ mod tests {
             stem: stem.to_string(),
             size: 500,
             vpx_metadata: None,
+            b2s_metadata: None,
         }
     }
 
@@ -542,6 +560,37 @@ mod tests {
         let hook = results.matches.iter().find(|m| m.game.id == "g2").unwrap();
         assert_eq!(hook.confidence, Confidence::High);
         assert_eq!(hook.file.stem, "hook_501");
+    }
+
+    fn make_b2s_scanned(stem: &str, game_name: &str) -> ScannedFile {
+        ScannedFile {
+            path: PathBuf::from(format!("/tables/{stem}.directb2s")),
+            resource_type: ResourceType::Backglasses,
+            stem: stem.to_string(),
+            size: 2000,
+            vpx_metadata: None,
+            b2s_metadata: Some(crate::b2s::B2sMetadata {
+                name: Some(stem.to_string()),
+                game_name: Some(game_name.to_string()),
+                author: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn b2s_matched_by_rom_name() {
+        let files = vec![
+            make_b2s_scanned("SomeBackglass", "mm_109c"),
+            make_b2s_scanned("AnotherGlass", "unknown_rom"),
+        ];
+        let games = vec![
+            make_game_with_roms("g1", "Medieval Madness", &["mm_109c"]),
+        ];
+
+        let results = match_files(&files, &games);
+        assert_eq!(results.matches.len(), 1);
+        assert_eq!(results.matches[0].game.id, "g1");
+        assert_eq!(results.matches[0].confidence, Confidence::High);
     }
 
     #[test]

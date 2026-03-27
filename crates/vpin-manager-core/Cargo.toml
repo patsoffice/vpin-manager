@@ -16,6 +16,7 @@ directories = { workspace = true }
 toml = { workspace = true }
 regex-lite = { workspace = true }
 vpin = { workspace = true }
+directb2s = { workspace = true }
 zip = { workspace = true }
 sevenz-rust2 = { workspace = true }
 unrar = { workspace = true }
