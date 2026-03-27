@@ -52,14 +52,33 @@ pub fn match_files<'a>(
         .map(|g| (g, normalize(&g.name)))
         .collect();
 
-    // Also build a ROM name -> Game lookup for VPX metadata matching.
+    // Build a ROM identifier -> Game lookup from VPS DB romFiles.
+    // The `version` field contains the ROM ID (e.g., "mm_109c", "hook_501").
+    // The `name` field sometimes also contains a ROM ID.
     let rom_games: std::collections::HashMap<String, &Game> = games
         .iter()
         .flat_map(|g| {
-            g.rom_files
+            let from_version = g.rom_files
                 .iter()
                 .filter_map(|r| r.version.as_ref())
-                .map(move |rom| (rom.to_lowercase(), g))
+                .map(move |rom| (rom.to_lowercase(), g));
+            let from_name = g.rom_files
+                .iter()
+                .filter_map(|r| r.name.as_ref())
+                .map(move |rom| (rom.to_lowercase(), g));
+            from_version.chain(from_name)
+        })
+        .collect();
+
+    // Also collect ROM names from VPX metadata we've already read,
+    // so we can match ROM zip files against games found via VPX tables.
+    let vpx_rom_games: std::collections::HashMap<String, &Game> = files
+        .iter()
+        .filter_map(|f| {
+            let rom = f.vpx_metadata.as_ref()?.rom_name.as_ref()?;
+            let normalized = normalize(&f.stem);
+            let (game, _) = find_best_match(&normalized, &normalized_games)?;
+            Some((rom.to_lowercase(), game))
         })
         .collect();
 
@@ -71,6 +90,20 @@ pub fn match_files<'a>(
         if let Some(result) = try_vpx_metadata_match(file, &normalized_games, &rom_games) {
             matches.push(result);
             continue;
+        }
+
+        // For ROM files, try matching stem against known ROM identifiers
+        if file.resource_type == crate::config::ResourceType::Roms {
+            let lower_stem = file.stem.to_lowercase();
+            if let Some(&game) = rom_games.get(&lower_stem).or_else(|| vpx_rom_games.get(&lower_stem)) {
+                matches.push(MatchResult {
+                    file,
+                    game,
+                    confidence: Confidence::High,
+                    score: 1.0,
+                });
+                continue;
+            }
         }
 
         // Fall back to filename-based matching
@@ -455,5 +488,69 @@ mod tests {
     fn similarity_no_overlap() {
         let score = similarity("completely", "different");
         assert!(score < 0.5);
+    }
+
+    fn make_rom_scanned(stem: &str) -> ScannedFile {
+        ScannedFile {
+            path: PathBuf::from(format!("/roms/{stem}.zip")),
+            resource_type: ResourceType::Roms,
+            stem: stem.to_string(),
+            size: 500,
+            vpx_metadata: None,
+        }
+    }
+
+    fn make_game_with_roms(id: &str, name: &str, rom_ids: &[&str]) -> Game {
+        let mut game = make_game(id, name);
+        game.rom_files = rom_ids
+            .iter()
+            .map(|rom| crate::vpsdb::models::RomFile {
+                id: rom.to_string(),
+                version: Some(rom.to_string()),
+                authors: vec![],
+                urls: vec![],
+                comment: None,
+                name: None,
+                created_at: None,
+                updated_at: None,
+                game: None,
+            })
+            .collect();
+        game
+    }
+
+    #[test]
+    fn rom_files_matched_by_identifier() {
+        let files = vec![
+            make_rom_scanned("mm_109c"),
+            make_rom_scanned("hook_501"),
+            make_rom_scanned("unknown_rom"),
+        ];
+        let games = vec![
+            make_game_with_roms("g1", "Medieval Madness", &["mm_109c", "mm_109b"]),
+            make_game_with_roms("g2", "Hook", &["hook_501", "hook_500"]),
+        ];
+
+        let results = match_files(&files, &games);
+        assert_eq!(results.matches.len(), 2);
+        assert_eq!(results.unmatched.len(), 1);
+
+        let mm = results.matches.iter().find(|m| m.game.id == "g1").unwrap();
+        assert_eq!(mm.confidence, Confidence::High);
+        assert_eq!(mm.file.stem, "mm_109c");
+
+        let hook = results.matches.iter().find(|m| m.game.id == "g2").unwrap();
+        assert_eq!(hook.confidence, Confidence::High);
+        assert_eq!(hook.file.stem, "hook_501");
+    }
+
+    #[test]
+    fn rom_match_is_case_insensitive() {
+        let files = vec![make_rom_scanned("MM_109C")];
+        let games = vec![make_game_with_roms("g1", "Medieval Madness", &["mm_109c"])];
+
+        let results = match_files(&files, &games);
+        assert_eq!(results.matches.len(), 1);
+        assert_eq!(results.matches[0].confidence, Confidence::High);
     }
 }
