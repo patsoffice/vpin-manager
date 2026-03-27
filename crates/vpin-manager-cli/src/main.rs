@@ -394,7 +394,7 @@ fn cmd_config(show_path: bool, init: bool) -> Result<(), Box<dyn std::error::Err
         println!("  Base directory: {}", profile.base_dir.display());
         for rt in ResourceType::ALL {
             if let Some(rel) = profile.mappings.get(rt) {
-                println!("  {rt}: {}", rel.display());
+                println!("  {rt}: {rel}");
             }
         }
         println!();
@@ -769,9 +769,11 @@ fn cmd_organize(
     let mut success = 0;
     let mut errors = 0;
 
+    let needs_game_name = game_dirs || profile.is_per_game();
+
     for file in &scan.files {
-        // Look up game name from library if available and game_dirs requested
-        let game_name = if game_dirs {
+        // Look up game name from library for per-game profiles or --game-dirs
+        let game_name = if needs_game_name {
             lookup_game_name(&db, &file.path)
         } else {
             None
@@ -782,6 +784,7 @@ fn cmd_organize(
             profile,
             file.resource_type,
             game_name.as_deref(),
+            None,
             action,
             false,
         ) {

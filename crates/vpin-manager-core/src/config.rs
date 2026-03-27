@@ -60,34 +60,49 @@ impl std::fmt::Display for ResourceType {
     }
 }
 
-/// An export profile mapping resource types to relative paths under a base directory.
+/// Context for resolving path templates in export profiles.
+#[derive(Debug, Default)]
+pub struct PathContext<'a> {
+    /// Game name (substituted for `{game}` in path templates).
+    pub game_name: Option<&'a str>,
+    /// ROM name (substituted for `{rom}` in path templates).
+    pub rom_name: Option<&'a str>,
+}
+
+/// An export profile mapping resource types to relative path templates under a base directory.
+///
+/// Path templates can contain placeholders:
+/// - `{game}` -- replaced with the sanitized game name
+/// - `{rom}` -- replaced with the ROM identifier
+///
+/// Flat profiles (like VPX standard) use plain paths without placeholders.
+/// Per-game profiles (like VPX-standalone/Batocera) use `{game}` to nest resources under game directories.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportProfile {
     pub name: String,
     pub base_dir: PathBuf,
-    pub mappings: HashMap<ResourceType, PathBuf>,
+    /// Path templates per resource type. May contain `{game}` and `{rom}` placeholders.
+    pub mappings: HashMap<ResourceType, String>,
 }
 
 impl ExportProfile {
-    /// Built-in VPX (standard install) profile.
+    /// Built-in VPX (standard Windows install) profile.
+    /// Flat structure: all tables in Tables/, all ROMs in VPinMAME/roms/, etc.
     pub fn vpx(base_dir: PathBuf) -> Self {
         let mut mappings = HashMap::new();
-        mappings.insert(ResourceType::Tables, PathBuf::from("Tables"));
-        mappings.insert(ResourceType::Backglasses, PathBuf::from("Tables"));
-        mappings.insert(ResourceType::Roms, PathBuf::from("VPinMAME/roms"));
-        mappings.insert(ResourceType::AltColor, PathBuf::from("VPinMAME/altcolor"));
-        mappings.insert(ResourceType::AltSound, PathBuf::from("VPinMAME/altsound"));
-        mappings.insert(
-            ResourceType::PupPacks,
-            PathBuf::from("PinUPSystem/PUPVideos"),
-        );
-        mappings.insert(ResourceType::Sound, PathBuf::from("Music"));
-        mappings.insert(ResourceType::Pov, PathBuf::from("POV"));
-        mappings.insert(ResourceType::WheelArt, PathBuf::from("Tables"));
-        mappings.insert(ResourceType::Toppers, PathBuf::from("Tables"));
-        mappings.insert(ResourceType::MediaPacks, PathBuf::from("MediaPacks"));
-        mappings.insert(ResourceType::Rules, PathBuf::from("Rules"));
-        mappings.insert(ResourceType::Tutorials, PathBuf::from("Tutorials"));
+        mappings.insert(ResourceType::Tables, "Tables".to_string());
+        mappings.insert(ResourceType::Backglasses, "Tables".to_string());
+        mappings.insert(ResourceType::Roms, "VPinMAME/roms".to_string());
+        mappings.insert(ResourceType::AltColor, "VPinMAME/altcolor".to_string());
+        mappings.insert(ResourceType::AltSound, "VPinMAME/altsound".to_string());
+        mappings.insert(ResourceType::PupPacks, "PinUPSystem/PUPVideos".to_string());
+        mappings.insert(ResourceType::Sound, "Music".to_string());
+        mappings.insert(ResourceType::Pov, "POV".to_string());
+        mappings.insert(ResourceType::WheelArt, "Tables".to_string());
+        mappings.insert(ResourceType::Toppers, "Tables".to_string());
+        mappings.insert(ResourceType::MediaPacks, "MediaPacks".to_string());
+        mappings.insert(ResourceType::Rules, "Rules".to_string());
+        mappings.insert(ResourceType::Tutorials, "Tutorials".to_string());
 
         Self {
             name: "vpx".to_string(),
@@ -96,22 +111,29 @@ impl ExportProfile {
         }
     }
 
-    /// Built-in VPX-standalone profile.
+    /// Built-in VPX-standalone profile (Batocera recommended layout).
+    /// Per-game structure: each game gets its own directory with all resources nested inside.
     pub fn vpx_standalone(base_dir: PathBuf) -> Self {
         let mut mappings = HashMap::new();
-        mappings.insert(ResourceType::Tables, PathBuf::from("tables"));
-        mappings.insert(ResourceType::Backglasses, PathBuf::from("tables"));
-        mappings.insert(ResourceType::Roms, PathBuf::from("roms"));
-        mappings.insert(ResourceType::AltColor, PathBuf::from("altcolor"));
-        mappings.insert(ResourceType::AltSound, PathBuf::from("altsound"));
-        mappings.insert(ResourceType::PupPacks, PathBuf::from("pupvideos"));
-        mappings.insert(ResourceType::Sound, PathBuf::from("music"));
-        mappings.insert(ResourceType::Pov, PathBuf::from("pov"));
-        mappings.insert(ResourceType::WheelArt, PathBuf::from("tables"));
-        mappings.insert(ResourceType::Toppers, PathBuf::from("tables"));
-        mappings.insert(ResourceType::MediaPacks, PathBuf::from("mediapacks"));
-        mappings.insert(ResourceType::Rules, PathBuf::from("rules"));
-        mappings.insert(ResourceType::Tutorials, PathBuf::from("tutorials"));
+        mappings.insert(ResourceType::Tables, "{game}".to_string());
+        mappings.insert(ResourceType::Backglasses, "{game}".to_string());
+        mappings.insert(ResourceType::Roms, "{game}/pinmame/roms".to_string());
+        mappings.insert(
+            ResourceType::AltColor,
+            "{game}/pinmame/altcolor".to_string(),
+        );
+        mappings.insert(
+            ResourceType::AltSound,
+            "{game}/pinmame/altsound".to_string(),
+        );
+        mappings.insert(ResourceType::PupPacks, "{game}/pupvideos".to_string());
+        mappings.insert(ResourceType::Sound, "{game}/music".to_string());
+        mappings.insert(ResourceType::Pov, "{game}".to_string());
+        mappings.insert(ResourceType::WheelArt, "{game}".to_string());
+        mappings.insert(ResourceType::Toppers, "{game}".to_string());
+        mappings.insert(ResourceType::MediaPacks, "{game}".to_string());
+        mappings.insert(ResourceType::Rules, "{game}".to_string());
+        mappings.insert(ResourceType::Tutorials, "{game}".to_string());
 
         Self {
             name: "vpx-standalone".to_string(),
@@ -120,13 +142,45 @@ impl ExportProfile {
         }
     }
 
-    /// Resolve the full path for a resource type.
-    pub fn path_for(&self, resource_type: ResourceType) -> PathBuf {
+    /// Resolve the full path for a resource type, substituting placeholders.
+    pub fn resolve_path(&self, resource_type: ResourceType, ctx: &PathContext) -> PathBuf {
         match self.mappings.get(&resource_type) {
-            Some(rel) => self.base_dir.join(rel),
+            Some(template) => {
+                let resolved = resolve_template(template, ctx);
+                self.base_dir.join(resolved)
+            }
             None => self.base_dir.clone(),
         }
     }
+
+    /// Check if this profile uses per-game paths (contains `{game}` placeholders).
+    pub fn is_per_game(&self) -> bool {
+        self.mappings.values().any(|v| v.contains("{game}"))
+    }
+}
+
+/// Resolve `{game}` and `{rom}` placeholders in a path template.
+fn resolve_template(template: &str, ctx: &PathContext) -> String {
+    let mut result = template.to_string();
+    if let Some(game) = ctx.game_name {
+        result = result.replace("{game}", &sanitize_dirname(game));
+    }
+    if let Some(rom) = ctx.rom_name {
+        result = result.replace("{rom}", rom);
+    }
+    result
+}
+
+/// Sanitize a name for use as a directory name.
+fn sanitize_dirname(name: &str) -> String {
+    name.chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            _ => c,
+        })
+        .collect::<String>()
+        .trim()
+        .to_string()
 }
 
 /// Top-level application configuration.
@@ -246,32 +300,73 @@ mod tests {
     }
 
     #[test]
-    fn vpx_profile_paths() {
+    fn vpx_profile_flat_paths() {
         let profile = ExportProfile::vpx(PathBuf::from("/vpinball"));
+        let ctx = PathContext::default();
         assert_eq!(
-            profile.path_for(ResourceType::Tables),
+            profile.resolve_path(ResourceType::Tables, &ctx),
             PathBuf::from("/vpinball/Tables")
         );
         assert_eq!(
-            profile.path_for(ResourceType::Roms),
+            profile.resolve_path(ResourceType::Roms, &ctx),
             PathBuf::from("/vpinball/VPinMAME/roms")
         );
         assert_eq!(
-            profile.path_for(ResourceType::PupPacks),
+            profile.resolve_path(ResourceType::PupPacks, &ctx),
             PathBuf::from("/vpinball/PinUPSystem/PUPVideos")
         );
+        assert!(!profile.is_per_game());
     }
 
     #[test]
-    fn vpx_standalone_profile_paths() {
+    fn vpx_standalone_per_game_paths() {
         let profile = ExportProfile::vpx_standalone(PathBuf::from("/vpx"));
+        let ctx = PathContext {
+            game_name: Some("Medieval Madness"),
+            rom_name: Some("mm_109c"),
+        };
+
         assert_eq!(
-            profile.path_for(ResourceType::Tables),
-            PathBuf::from("/vpx/tables")
+            profile.resolve_path(ResourceType::Tables, &ctx),
+            PathBuf::from("/vpx/Medieval Madness")
         );
         assert_eq!(
-            profile.path_for(ResourceType::Roms),
-            PathBuf::from("/vpx/roms")
+            profile.resolve_path(ResourceType::Backglasses, &ctx),
+            PathBuf::from("/vpx/Medieval Madness")
+        );
+        assert_eq!(
+            profile.resolve_path(ResourceType::Roms, &ctx),
+            PathBuf::from("/vpx/Medieval Madness/pinmame/roms")
+        );
+        assert_eq!(
+            profile.resolve_path(ResourceType::AltColor, &ctx),
+            PathBuf::from("/vpx/Medieval Madness/pinmame/altcolor")
+        );
+        assert_eq!(
+            profile.resolve_path(ResourceType::AltSound, &ctx),
+            PathBuf::from("/vpx/Medieval Madness/pinmame/altsound")
+        );
+        assert_eq!(
+            profile.resolve_path(ResourceType::PupPacks, &ctx),
+            PathBuf::from("/vpx/Medieval Madness/pupvideos")
+        );
+        assert_eq!(
+            profile.resolve_path(ResourceType::Sound, &ctx),
+            PathBuf::from("/vpx/Medieval Madness/music")
+        );
+        assert!(profile.is_per_game());
+    }
+
+    #[test]
+    fn path_sanitizes_game_name() {
+        let profile = ExportProfile::vpx_standalone(PathBuf::from("/vpx"));
+        let ctx = PathContext {
+            game_name: Some("AC/DC: Let There Be Rock"),
+            rom_name: None,
+        };
+        assert_eq!(
+            profile.resolve_path(ResourceType::Tables, &ctx),
+            PathBuf::from("/vpx/AC_DC_ Let There Be Rock")
         );
     }
 
