@@ -5,8 +5,8 @@ A virtual pinball resource library manager. Browse, search, download, import, an
 ## Features
 
 - **Browse & Search** -- Query the VPS database (~2,500 games) by name, manufacturer, year, type, table format, and author
-- **Library Management** -- Track installed resources across multiple named libraries, check for updates against the VPS database
-- **Import** -- Scan existing directories for virtual pinball files, fuzzy-match them to VPS entries, and register them in your library
+- **Smart Import** -- Scan directories for virtual pinball files and match them to VPS entries using multiple strategies: VPX table metadata, B2S backglass metadata, ROM identifiers, and fuzzy filename matching. Identifies the specific table variant (author, version, features) when possible.
+- **Library Management** -- Track installed resources with version, authors, and file paths across multiple named libraries. Check for updates against the VPS database.
 - **File Organization** -- Move or copy files into platform-specific folder structures with built-in presets for VPX and VPX-standalone, plus custom profiles
 - **Archive Extraction** -- Extract ZIP, 7z, and RAR archives natively (pure Rust)
 - **VPinMediaDB** -- Download high-resolution media assets (images, videos, audio) keyed by VPS game ID (planned)
@@ -119,7 +119,17 @@ vpin-manager config --init
 
 ### Import existing files
 
-Scan a directory for virtual pinball files, fuzzy-match them against the VPS database, and register them in your library. Files are not moved -- only tracked.
+Scan a directory for virtual pinball files, match them to VPS entries, and register them in your library. Files are not moved -- only tracked.
+
+The importer uses multiple matching strategies in priority order:
+
+1. **VPX metadata** -- Reads table name, author, version, and ROM name directly from `.vpx` files
+2. **B2S metadata** -- Reads ROM identifier and author from `.directb2s` backglass files
+3. **ROM identifier** -- Matches ROM zip filenames (e.g., `mm_109c.zip`) against VPS database ROM entries
+4. **Author disambiguation** -- When multiple games share a ROM (e.g., original vs. retheme), uses author metadata to pick the correct game
+5. **Fuzzy filename** -- Normalizes filenames by stripping separators, version numbers, and common tokens, then matches against game names
+
+When a specific VPS resource variant is identified (by author + version), the import pulls the VPS resource ID, version, and author list -- even for zipped files where internal metadata can't be read.
 
 ```sh
 # Scan and import (prompts for confirmation)
@@ -135,7 +145,7 @@ vpin-manager import ~/VPinball/Tables --high-only -y
 vpin-manager import ~/VPinball/Tables --library my-cabinet
 ```
 
-Supported file types: `.vpx`, `.vpt`, `.fpt` (tables), `.directb2s` (backglasses), `.pov`, `.pal`/`.vni`/`.cRZ` (alt color), `.mp3`/`.wav`/`.ogg` (sound), plus archives in context-appropriate directories (ZIPs in `roms/`, etc.).
+Supported file types: `.vpx`, `.vpt`, `.fpt` (tables), `.directb2s` (backglasses), `.pov`, `.pal`/`.vni`/`.cRZ` (alt color), `.mp3`/`.wav`/`.ogg` (sound), plus archives (`.vpx.zip`, ZIPs in `roms/`, archives with `vpx`/`vpw` in the name, etc.).
 
 ### Library management
 
@@ -211,10 +221,21 @@ On macOS, vpin-manager stores its data in standard platform directories:
 
 Override the data directory with `--data-dir` on any command. Multiple named libraries are supported via `--library <name>`.
 
+## Project Structure
+
+```text
+crates/
+├── vpin-manager-core/   # Library: VPS DB, import matching, file organization
+├── vpin-manager-cli/    # Binary: CLI (produces `vpin-manager`)
+└── vpin-manager-web/    # Binary: Web UI (stub, planned)
+```
+
 ## Data Sources
 
 - Game and resource metadata: [VPS Database](https://virtualpinballspreadsheet.github.io/vps-db/db/vpsdb.json)
 - Database freshness: [lastUpdated.json](https://virtualpinballspreadsheet.github.io/vps-db/lastUpdated.json)
+- VPX file parsing: [vpin](https://crates.io/crates/vpin) crate
+- B2S file parsing: [directb2s](https://crates.io/crates/directb2s) crate
 - Media assets: [VPinMediaDB](https://github.com/superhac/vpinmediadb) (planned)
 
 ## License
