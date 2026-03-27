@@ -13,7 +13,10 @@ use vpin_manager_core::vpsdb::models::Game;
 use vpin_manager_core::vpsdb::search::{self, SearchQuery, SortOrder};
 
 #[derive(Parser)]
-#[command(name = "vpin-manager", about = "Virtual pinball resource library manager")]
+#[command(
+    name = "vpin-manager",
+    about = "Virtual pinball resource library manager"
+)]
 struct Cli {
     /// Override the data/cache directory
     #[arg(long, global = true)]
@@ -193,11 +196,8 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
 // --- Sync ---
 
-async fn cmd_sync(
-    cache_dir: &PathBuf,
-    force: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let vpsdb = VpsDb::new(cache_dir.clone());
+async fn cmd_sync(cache_dir: &Path, force: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let vpsdb = VpsDb::new(cache_dir.to_path_buf());
 
     println!("Checking VPS database...");
     let result = if force {
@@ -221,12 +221,12 @@ async fn cmd_sync(
 // --- Search ---
 
 fn cmd_search(
-    cache_dir: &PathBuf,
+    cache_dir: &Path,
     query: &SearchQuery,
     sort: SortOrder,
     limit: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let vpsdb = VpsDb::new(cache_dir.clone());
+    let vpsdb = VpsDb::new(cache_dir.to_path_buf());
     let games = vpsdb.load_cached()?;
 
     let results = search::search(&games, query, sort, 0, limit);
@@ -279,11 +279,8 @@ fn cmd_search(
 
 // --- Show ---
 
-fn cmd_show(
-    cache_dir: &PathBuf,
-    game_query: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let vpsdb = VpsDb::new(cache_dir.clone());
+fn cmd_show(cache_dir: &Path, game_query: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let vpsdb = VpsDb::new(cache_dir.to_path_buf());
     let games = vpsdb.load_cached()?;
 
     let game = find_game(&games, game_query);
@@ -368,8 +365,7 @@ fn cmd_show(
 // --- Config ---
 
 fn cmd_config(show_path: bool, init: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let config_path = AppConfig::default_path()
-        .ok_or("could not determine config directory")?;
+    let config_path = AppConfig::default_path().ok_or("could not determine config directory")?;
 
     if show_path {
         println!("{}", config_path.display());
@@ -410,19 +406,18 @@ fn cmd_config(show_path: bool, init: bool) -> Result<(), Box<dyn std::error::Err
 // --- Import ---
 
 fn cmd_import(
-    cache_dir: &PathBuf,
+    cache_dir: &Path,
     dir: &Path,
     high_only: bool,
     auto_confirm: bool,
     library_name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-
     if !dir.exists() {
         return Err(format!("directory not found: {}", dir.display()).into());
     }
 
     // Load VPS database
-    let vpsdb = VpsDb::new(cache_dir.clone());
+    let vpsdb = VpsDb::new(cache_dir.to_path_buf());
     let games = vpsdb.load_cached()?;
 
     // Scan directory
@@ -489,7 +484,11 @@ fn cmd_import(
 
     for m in &matches {
         let file_name = truncate(
-            m.file.path.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
+            m.file
+                .path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("?"),
             name_w,
         );
         let game_name = truncate(&m.game.name, game_w);
@@ -505,7 +504,11 @@ fn cmd_import(
         for u in &results.unmatched {
             println!(
                 "  {} ({})",
-                u.file.path.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
+                u.file
+                    .path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("?"),
                 u.file.resource_type,
             );
         }
@@ -513,7 +516,10 @@ fn cmd_import(
 
     // Confirm
     if !auto_confirm {
-        println!("\nRegister {} matches in library '{library_name}'? [y/N] ", matches.len());
+        println!(
+            "\nRegister {} matches in library '{library_name}'? [y/N] ",
+            matches.len()
+        );
         let mut input = String::new();
         std::io::stdin().read_line(&mut input)?;
         if !input.trim().eq_ignore_ascii_case("y") {
@@ -523,8 +529,8 @@ fn cmd_import(
     }
 
     // Register in library
-    let db_path = LibraryDb::default_path(library_name)
-        .ok_or("could not determine library path")?;
+    let db_path =
+        LibraryDb::default_path(library_name).ok_or("could not determine library path")?;
     let db = LibraryDb::open(&db_path)?;
 
     let mut registered = 0;
@@ -577,7 +583,10 @@ fn cmd_import(
             file_path: m.file.path.to_string_lossy().to_string(),
             installed_at: None,
             vps_updated_at: m.game.updated_at,
-            metadata: Some(format!("{{\"confidence\":\"{}\",\"score\":{:.2}}}", m.confidence, m.score)),
+            metadata: Some(format!(
+                "{{\"confidence\":\"{}\",\"score\":{:.2}}}",
+                m.confidence, m.score
+            )),
             authors,
         };
         db.upsert_installed(&resource)?;
@@ -591,12 +600,12 @@ fn cmd_import(
 // --- Library ---
 
 fn cmd_library(
-    cache_dir: &PathBuf,
+    cache_dir: &Path,
     action: Option<LibraryAction>,
     library_name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let db_path = LibraryDb::default_path(library_name)
-        .ok_or("could not determine library path")?;
+    let db_path =
+        LibraryDb::default_path(library_name).ok_or("could not determine library path")?;
 
     if !db_path.exists() {
         println!("Library '{library_name}' is empty. Use 'vpin-manager import' to add resources.");
@@ -611,10 +620,7 @@ fn cmd_library(
     }
 }
 
-fn cmd_library_list(
-    db: &LibraryDb,
-    library_name: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_library_list(db: &LibraryDb, library_name: &str) -> Result<(), Box<dyn std::error::Error>> {
     let resources = db.list_installed(None)?;
 
     if resources.is_empty() {
@@ -661,11 +667,11 @@ fn cmd_library_list(
 }
 
 fn cmd_library_status(
-    cache_dir: &PathBuf,
+    cache_dir: &Path,
     db: &LibraryDb,
     library_name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let vpsdb = VpsDb::new(cache_dir.clone());
+    let vpsdb = VpsDb::new(cache_dir.to_path_buf());
     let games = vpsdb.load_cached()?;
 
     let resources = db.list_installed(None)?;
@@ -708,7 +714,9 @@ fn cmd_library_status(
     }
 
     println!();
-    println!("{up_to_date} up to date, {updates_available} updates available, {unknown} not found in VPS DB");
+    println!(
+        "{up_to_date} up to date, {updates_available} updates available, {unknown} not found in VPS DB"
+    );
 
     Ok(())
 }
@@ -716,22 +724,23 @@ fn cmd_library_status(
 // --- Organize ---
 
 fn cmd_organize(
-    dir: &PathBuf,
+    dir: &Path,
     copy: bool,
     game_dirs: bool,
     library_name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-
     if !dir.exists() {
         return Err(format!("directory not found: {}", dir.display()).into());
     }
 
-    let config_path = AppConfig::default_path()
-        .ok_or("could not determine config directory")?;
+    let config_path = AppConfig::default_path().ok_or("could not determine config directory")?;
     let config = AppConfig::load(&config_path)?;
-    let profile = config
-        .active_profile()
-        .ok_or_else(|| format!("active profile '{}' not found in config", config.active_profile))?;
+    let profile = config.active_profile().ok_or_else(|| {
+        format!(
+            "active profile '{}' not found in config",
+            config.active_profile
+        )
+    })?;
 
     // Scan directory
     println!("Scanning {}...", dir.display());
@@ -779,7 +788,11 @@ fn cmd_organize(
             Ok(result) => {
                 println!(
                     "  {action_verb} {} -> {}",
-                    result.source.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
+                    result
+                        .source
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("?"),
                     result.destination.display(),
                 );
                 success += 1;
@@ -787,7 +800,10 @@ fn cmd_organize(
             Err(e) => {
                 eprintln!(
                     "  ERROR {}: {e}",
-                    file.path.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
+                    file.path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("?"),
                 );
                 errors += 1;
             }
@@ -799,7 +815,6 @@ fn cmd_organize(
 }
 
 fn lookup_game_name(db: &Option<LibraryDb>, file_path: &Path) -> Option<String> {
-
     let db = db.as_ref()?;
     let file_str = file_path.to_string_lossy();
 
@@ -814,21 +829,18 @@ fn lookup_game_name(db: &Option<LibraryDb>, file_path: &Path) -> Option<String> 
 // --- Display helpers ---
 
 fn find_game<'a>(games: &'a [Game], query: &str) -> Option<&'a Game> {
-    games
-        .iter()
-        .find(|g| g.id == query)
-        .or_else(|| {
-            let lower = query.to_lowercase();
-            let matches: Vec<_> = games
-                .iter()
-                .filter(|g| g.name.to_lowercase().contains(&lower))
-                .collect();
-            if matches.len() == 1 {
-                Some(matches[0])
-            } else {
-                None
-            }
-        })
+    games.iter().find(|g| g.id == query).or_else(|| {
+        let lower = query.to_lowercase();
+        let matches: Vec<_> = games
+            .iter()
+            .filter(|g| g.name.to_lowercase().contains(&lower))
+            .collect();
+        if matches.len() == 1 {
+            Some(matches[0])
+        } else {
+            None
+        }
+    })
 }
 
 fn print_table_files(tables: &[vpin_manager_core::vpsdb::models::TableFile]) {
@@ -849,7 +861,11 @@ fn print_table_files(tables: &[vpin_manager_core::vpsdb::models::TableFile]) {
             println!("    {comment}");
         }
         for url in &t.urls {
-            let broken = if url.broken == Some(true) { " [BROKEN]" } else { "" };
+            let broken = if url.broken == Some(true) {
+                " [BROKEN]"
+            } else {
+                ""
+            };
             println!("    -> {}{broken}", url.url);
         }
     }
@@ -875,7 +891,11 @@ where
             println!("  v{ver} by {authors} ({extra_str})");
         }
         for url in item.urls() {
-            let broken = if url.broken == Some(true) { " [BROKEN]" } else { "" };
+            let broken = if url.broken == Some(true) {
+                " [BROKEN]"
+            } else {
+                ""
+            };
             println!("    -> {}{broken}", url.url);
         }
     }
@@ -902,7 +922,11 @@ fn print_tutorial_section(tutorials: &[vpin_manager_core::vpsdb::models::Tutoria
             println!("    -> {url}");
         }
         for url in &t.urls {
-            let broken = if url.broken == Some(true) { " [BROKEN]" } else { "" };
+            let broken = if url.broken == Some(true) {
+                " [BROKEN]"
+            } else {
+                ""
+            };
             println!("    -> {}{broken}", url.url);
         }
     }
@@ -911,23 +935,23 @@ fn print_tutorial_section(tutorials: &[vpin_manager_core::vpsdb::models::Tutoria
 
 /// Extract authors from file metadata (VPX or B2S).
 fn extract_authors(file: &vpin_manager_core::library::scanner::ScannedFile) -> Vec<String> {
-    if let Some(ref meta) = file.vpx_metadata {
-        if let Some(ref author) = meta.author_name {
-            return author
-                .split([',', '&', '/'])
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-        }
+    if let Some(ref meta) = file.vpx_metadata
+        && let Some(ref author) = meta.author_name
+    {
+        return author
+            .split([',', '&', '/'])
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
     }
-    if let Some(ref meta) = file.b2s_metadata {
-        if let Some(ref author) = meta.author {
-            return author
-                .split([',', '&', '/'])
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-        }
+    if let Some(ref meta) = file.b2s_metadata
+        && let Some(ref author) = meta.author
+    {
+        return author
+            .split([',', '&', '/'])
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
     }
     vec![]
 }
@@ -973,25 +997,49 @@ trait HasResourceFields {
 }
 
 impl HasResourceFields for vpin_manager_core::vpsdb::models::ResourceFile {
-    fn version(&self) -> Option<&str> { self.version.as_deref() }
-    fn authors(&self) -> &[String] { &self.authors }
-    fn urls(&self) -> &[vpin_manager_core::vpsdb::models::ResourceUrl] { &self.urls }
+    fn version(&self) -> Option<&str> {
+        self.version.as_deref()
+    }
+    fn authors(&self) -> &[String] {
+        &self.authors
+    }
+    fn urls(&self) -> &[vpin_manager_core::vpsdb::models::ResourceUrl] {
+        &self.urls
+    }
 }
 
 impl HasResourceFields for vpin_manager_core::vpsdb::models::B2sFile {
-    fn version(&self) -> Option<&str> { self.version.as_deref() }
-    fn authors(&self) -> &[String] { &self.authors }
-    fn urls(&self) -> &[vpin_manager_core::vpsdb::models::ResourceUrl] { &self.urls }
+    fn version(&self) -> Option<&str> {
+        self.version.as_deref()
+    }
+    fn authors(&self) -> &[String] {
+        &self.authors
+    }
+    fn urls(&self) -> &[vpin_manager_core::vpsdb::models::ResourceUrl] {
+        &self.urls
+    }
 }
 
 impl HasResourceFields for vpin_manager_core::vpsdb::models::RomFile {
-    fn version(&self) -> Option<&str> { self.version.as_deref() }
-    fn authors(&self) -> &[String] { &self.authors }
-    fn urls(&self) -> &[vpin_manager_core::vpsdb::models::ResourceUrl] { &self.urls }
+    fn version(&self) -> Option<&str> {
+        self.version.as_deref()
+    }
+    fn authors(&self) -> &[String] {
+        &self.authors
+    }
+    fn urls(&self) -> &[vpin_manager_core::vpsdb::models::ResourceUrl] {
+        &self.urls
+    }
 }
 
 impl HasResourceFields for vpin_manager_core::vpsdb::models::AltColorFile {
-    fn version(&self) -> Option<&str> { self.version.as_deref() }
-    fn authors(&self) -> &[String] { &self.authors }
-    fn urls(&self) -> &[vpin_manager_core::vpsdb::models::ResourceUrl] { &self.urls }
+    fn version(&self) -> Option<&str> {
+        self.version.as_deref()
+    }
+    fn authors(&self) -> &[String] {
+        &self.authors
+    }
+    fn urls(&self) -> &[vpin_manager_core::vpsdb::models::ResourceUrl] {
+        &self.urls
+    }
 }

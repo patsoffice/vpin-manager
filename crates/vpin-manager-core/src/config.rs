@@ -177,9 +177,7 @@ impl AppConfig {
 
     /// Get the active export profile.
     pub fn active_profile(&self) -> Option<&ExportProfile> {
-        self.profiles
-            .iter()
-            .find(|p| p.name == self.active_profile)
+        self.profiles.iter().find(|p| p.name == self.active_profile)
     }
 
     /// Return the default config file path.

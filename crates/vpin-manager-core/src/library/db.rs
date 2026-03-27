@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 
 /// Current schema version. Bump this when adding migrations.
 const SCHEMA_VERSION: u32 = 2;
@@ -52,15 +52,14 @@ impl LibraryDb {
     }
 
     fn get_schema_version(&self) -> Result<u32, DbError> {
-        let version: u32 = self.conn.pragma_query_value(None, "user_version", |row| {
-            row.get(0)
-        })?;
+        let version: u32 = self
+            .conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))?;
         Ok(version)
     }
 
     fn set_schema_version(&self, version: u32) -> Result<(), DbError> {
-        self.conn
-            .pragma_update(None, "user_version", version)?;
+        self.conn.pragma_update(None, "user_version", version)?;
         Ok(())
     }
 
@@ -145,13 +144,13 @@ impl LibraryDb {
             )
             .optional()?;
 
-        if let Some(ref old_id) = existing_id {
-            if old_id != &resource.id {
-                tx.execute(
-                    "DELETE FROM installed_resources WHERE id = ?1",
-                    params![old_id],
-                )?;
-            }
+        if let Some(ref old_id) = existing_id
+            && old_id != &resource.id
+        {
+            tx.execute(
+                "DELETE FROM installed_resources WHERE id = ?1",
+                params![old_id],
+            )?;
         }
 
         tx.execute(
@@ -215,10 +214,7 @@ impl LibraryDb {
     }
 
     /// List all installed resources, optionally filtered by game ID.
-    pub fn list_installed(
-        &self,
-        game_id: Option<&str>,
-    ) -> Result<Vec<InstalledResource>, DbError> {
+    pub fn list_installed(&self, game_id: Option<&str>) -> Result<Vec<InstalledResource>, DbError> {
         let mut resources = Vec::new();
 
         if let Some(gid) = game_id {
@@ -256,20 +252,19 @@ impl LibraryDb {
     /// Remove an installed resource by ID.
     pub fn remove_installed(&self, id: &str) -> Result<bool, DbError> {
         // resource_authors cleaned up by ON DELETE CASCADE
-        let count = self.conn.execute(
-            "DELETE FROM installed_resources WHERE id = ?1",
-            params![id],
-        )?;
+        let count = self
+            .conn
+            .execute("DELETE FROM installed_resources WHERE id = ?1", params![id])?;
         Ok(count > 0)
     }
 
     /// Count installed resources.
     pub fn count_installed(&self) -> Result<u64, DbError> {
-        let count: u64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM installed_resources",
-            [],
-            |row| row.get(0),
-        )?;
+        let count: u64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM installed_resources", [], |row| {
+                    row.get(0)
+                })?;
         Ok(count)
     }
 
@@ -379,10 +374,7 @@ impl LibraryDb {
     }
 
     /// List download history for a resource.
-    pub fn download_history_for(
-        &self,
-        resource_id: &str,
-    ) -> Result<Vec<DownloadRecord>, DbError> {
+    pub fn download_history_for(&self, resource_id: &str) -> Result<Vec<DownloadRecord>, DbError> {
         let mut stmt = self.conn.prepare(
             "SELECT id, resource_id, game_id, url, status, started_at,
                     completed_at, file_path, error
@@ -645,10 +637,7 @@ mod tests {
         let history = db.download_history_for("r1").unwrap();
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].status, "completed");
-        assert_eq!(
-            history[0].file_path.as_deref(),
-            Some("/path/to/file.zip")
-        );
+        assert_eq!(history[0].file_path.as_deref(), Some("/path/to/file.zip"));
     }
 
     #[test]

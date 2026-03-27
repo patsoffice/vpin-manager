@@ -15,12 +15,11 @@ pub struct B2sMetadata {
 
 /// Read metadata from a .directb2s file.
 pub fn read_b2s_metadata(path: &Path) -> Result<B2sMetadata, B2sError> {
-    let file = File::open(path)
-        .map_err(|e| B2sError::Io(format!("{}: {e}", path.display())))?;
+    let file = File::open(path).map_err(|e| B2sError::Io(format!("{}: {e}", path.display())))?;
     let reader = BufReader::new(file);
 
-    let data = directb2s::read(reader)
-        .map_err(|e| B2sError::Parse(format!("{}: {e}", path.display())))?;
+    let data =
+        directb2s::read(reader).map_err(|e| B2sError::Parse(format!("{}: {e}", path.display())))?;
 
     Ok(B2sMetadata {
         name: non_empty(data.name.value),
@@ -30,11 +29,7 @@ pub fn read_b2s_metadata(path: &Path) -> Result<B2sMetadata, B2sError> {
 }
 
 fn non_empty(s: String) -> Option<String> {
-    if s.trim().is_empty() {
-        None
-    } else {
-        Some(s)
-    }
+    if s.trim().is_empty() { None } else { Some(s) }
 }
 
 #[derive(Debug)]

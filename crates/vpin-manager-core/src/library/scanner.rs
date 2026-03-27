@@ -164,7 +164,10 @@ fn classify_type(
     stem: &str,
 ) -> Option<(ResourceType, String)> {
     // Check extension map first
-    if let Some(&(_, rt)) = EXTENSION_MAP.iter().find(|(ext, _)| ext.eq_ignore_ascii_case(extension)) {
+    if let Some(&(_, rt)) = EXTENSION_MAP
+        .iter()
+        .find(|(ext, _)| ext.eq_ignore_ascii_case(extension))
+    {
         return Some((rt, stem.to_string()));
     }
 
@@ -174,15 +177,17 @@ fn classify_type(
         let lower_stem = stem.to_lowercase();
 
         // Check for double extensions like .vpx.zip, .directb2s.zip
-        if let Some(inner_ext) = Path::new(stem).extension().and_then(|e| e.to_str()) {
-            if let Some(&(_, rt)) = EXTENSION_MAP.iter().find(|(ext, _)| ext.eq_ignore_ascii_case(inner_ext)) {
-                let inner_stem = Path::new(stem)
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or(stem)
-                    .to_string();
-                return Some((rt, inner_stem));
-            }
+        if let Some(inner_ext) = Path::new(stem).extension().and_then(|e| e.to_str())
+            && let Some(&(_, rt)) = EXTENSION_MAP
+                .iter()
+                .find(|(ext, _)| ext.eq_ignore_ascii_case(inner_ext))
+        {
+            let inner_stem = Path::new(stem)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or(stem)
+                .to_string();
+            return Some((rt, inner_stem));
         }
 
         // Check name patterns
@@ -301,9 +306,10 @@ mod tests {
         let dir = setup_test_dir();
         let results = scan_directory(dir.path());
 
-        let has_txt = results.files.iter().any(|f| {
-            f.path.extension().is_some_and(|e| e == "txt")
-        });
+        let has_txt = results
+            .files
+            .iter()
+            .any(|f| f.path.extension().is_some_and(|e| e == "txt"));
         assert!(!has_txt);
     }
 
@@ -342,23 +348,28 @@ mod tests {
     fn scan_vpx_zip_double_extension() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(
-            dir.path().join("Fish Tales (Williams 1992) VPW 1.1.vpx.zip"),
+            dir.path()
+                .join("Fish Tales (Williams 1992) VPW 1.1.vpx.zip"),
             b"fake",
         )
         .unwrap();
-        fs::write(
-            dir.path().join("Hook.directb2s.zip"),
-            b"fake",
-        )
-        .unwrap();
+        fs::write(dir.path().join("Hook.directb2s.zip"), b"fake").unwrap();
 
         let results = scan_directory(dir.path());
         assert_eq!(results.files.len(), 2);
 
-        let table = results.files.iter().find(|f| f.resource_type == ResourceType::Tables).unwrap();
+        let table = results
+            .files
+            .iter()
+            .find(|f| f.resource_type == ResourceType::Tables)
+            .unwrap();
         assert_eq!(table.stem, "Fish Tales (Williams 1992) VPW 1.1");
 
-        let b2s = results.files.iter().find(|f| f.resource_type == ResourceType::Backglasses).unwrap();
+        let b2s = results
+            .files
+            .iter()
+            .find(|f| f.resource_type == ResourceType::Backglasses)
+            .unwrap();
         assert_eq!(b2s.stem, "Hook");
     }
 

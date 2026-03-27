@@ -126,8 +126,14 @@ pub fn organize_files(
     let mut errors = Vec::new();
 
     for (source, resource_type, game_name) in files {
-        match organize_file(source, profile, *resource_type, game_name.as_deref(), action, overwrite)
-        {
+        match organize_file(
+            source,
+            profile,
+            *resource_type,
+            game_name.as_deref(),
+            action,
+            overwrite,
+        ) {
             Ok(result) => results.push(result),
             Err(e) => errors.push((source.clone(), e)),
         }
@@ -168,12 +174,7 @@ mod tests {
     #[test]
     fn destination_path_with_game_name() {
         let profile = test_profile(Path::new("/vpx"));
-        let dest = destination_path(
-            &profile,
-            ResourceType::Tables,
-            "hook.vpx",
-            Some("Hook"),
-        );
+        let dest = destination_path(&profile, ResourceType::Tables, "hook.vpx", Some("Hook"));
         assert_eq!(dest, PathBuf::from("/vpx/tables/Hook/hook.vpx"));
     }
 
@@ -263,10 +264,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(
-            result.destination,
-            base.join("output/tables/Hook/hook.vpx")
-        );
+        assert_eq!(result.destination, base.join("output/tables/Hook/hook.vpx"));
         assert!(result.destination.exists());
     }
 

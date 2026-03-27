@@ -185,8 +185,7 @@ fn extract_rar(archive_path: &Path, dest_dir: &Path) -> Result<ExtractResult, Ex
 pub fn extract_to_temp(
     archive_path: &Path,
 ) -> Result<(tempfile::TempDir, ExtractResult), ExtractError> {
-    let temp_dir =
-        tempfile::tempdir().map_err(|e| ExtractError::Io(e))?;
+    let temp_dir = tempfile::tempdir().map_err(ExtractError::Io)?;
     let result = extract(archive_path, temp_dir.path())?;
     Ok((temp_dir, result))
 }

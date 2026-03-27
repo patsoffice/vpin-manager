@@ -83,15 +83,10 @@ pub struct ImportResults<'a> {
 }
 
 /// Match scanned files against VPS database games by normalized name similarity.
-pub fn match_files<'a>(
-    files: &'a [ScannedFile],
-    games: &'a [Game],
-) -> ImportResults<'a> {
+pub fn match_files<'a>(files: &'a [ScannedFile], games: &'a [Game]) -> ImportResults<'a> {
     // Pre-compute normalized game names for faster comparison.
-    let normalized_games: Vec<(&Game, String)> = games
-        .iter()
-        .map(|g| (g, normalize(&g.name)))
-        .collect();
+    let normalized_games: Vec<(&Game, String)> =
+        games.iter().map(|g| (g, normalize(&g.name))).collect();
 
     // Build a ROM identifier -> list of Games lookup from VPS DB romFiles.
     // Multiple games can share the same ROM (e.g., original vs. JP's retheme).
@@ -100,16 +95,10 @@ pub fn match_files<'a>(
     for g in games {
         for r in &g.rom_files {
             if let Some(ref v) = r.version {
-                rom_games_multi
-                    .entry(v.to_lowercase())
-                    .or_default()
-                    .push(g);
+                rom_games_multi.entry(v.to_lowercase()).or_default().push(g);
             }
             if let Some(ref n) = r.name {
-                rom_games_multi
-                    .entry(n.to_lowercase())
-                    .or_default()
-                    .push(g);
+                rom_games_multi.entry(n.to_lowercase()).or_default().push(g);
             }
         }
     }
@@ -118,18 +107,18 @@ pub fn match_files<'a>(
     let mut vpx_rom_games: std::collections::HashMap<String, Vec<&Game>> =
         std::collections::HashMap::new();
     for f in files {
-        if let Some(meta) = f.vpx_metadata.as_ref() {
-            if let Some(rom) = meta.rom_name.as_ref() {
-                let normalized = normalize(&f.stem);
-                let author = meta.author_name.as_deref();
-                if let Some((game, _)) =
-                    find_best_match_with_author(&normalized, &normalized_games, author)
-                {
-                    vpx_rom_games
-                        .entry(rom.to_lowercase())
-                        .or_default()
-                        .push(game);
-                }
+        if let Some(meta) = f.vpx_metadata.as_ref()
+            && let Some(rom) = meta.rom_name.as_ref()
+        {
+            let normalized = normalize(&f.stem);
+            let author = meta.author_name.as_deref();
+            if let Some((game, _)) =
+                find_best_match_with_author(&normalized, &normalized_games, author)
+            {
+                vpx_rom_games
+                    .entry(rom.to_lowercase())
+                    .or_default()
+                    .push(game);
             }
         }
     }
@@ -145,23 +134,23 @@ pub fn match_files<'a>(
         }
 
         // Try B2S metadata — game_name is a ROM identifier
-        if let Some(ref meta) = file.b2s_metadata {
-            if let Some(ref game_name) = meta.game_name {
-                let lower = game_name.to_lowercase();
-                let b2s_author = meta.author.as_deref();
-                if let Some(game) = resolve_rom_game(&rom_games_multi, &lower, b2s_author)
-                    .or_else(|| resolve_rom_game(&vpx_rom_games, &lower, b2s_author))
-                {
-                    let matched_resource = find_matching_b2s_file(file, game);
-                    matches.push(MatchResult {
-                        file,
-                        game,
-                        confidence: Confidence::High,
-                        score: 1.0,
-                        matched_resource,
-                    });
-                    continue;
-                }
+        if let Some(ref meta) = file.b2s_metadata
+            && let Some(ref game_name) = meta.game_name
+        {
+            let lower = game_name.to_lowercase();
+            let b2s_author = meta.author.as_deref();
+            if let Some(game) = resolve_rom_game(&rom_games_multi, &lower, b2s_author)
+                .or_else(|| resolve_rom_game(&vpx_rom_games, &lower, b2s_author))
+            {
+                let matched_resource = find_matching_b2s_file(file, game);
+                matches.push(MatchResult {
+                    file,
+                    game,
+                    confidence: Confidence::High,
+                    score: 1.0,
+                    matched_resource,
+                });
+                continue;
             }
         }
 
@@ -191,7 +180,9 @@ pub fn match_files<'a>(
             .and_then(|m| m.author_name.as_deref())
             .or_else(|| file.b2s_metadata.as_ref().and_then(|m| m.author.as_deref()));
 
-        if let Some((game, score)) = find_best_match_with_author(&normalized_stem, &normalized_games, file_author) {
+        if let Some((game, score)) =
+            find_best_match_with_author(&normalized_stem, &normalized_games, file_author)
+        {
             let confidence = if score >= 0.95 {
                 Confidence::High
             } else if score >= 0.7 {
@@ -232,17 +223,18 @@ fn try_vpx_metadata_match<'a>(
     let meta = file.vpx_metadata.as_ref()?;
 
     // Try ROM name match first (most precise)
-    if let Some(ref rom) = meta.rom_name {
-        if let Some(game) = resolve_rom_game(rom_games, &rom.to_lowercase(), meta.author_name.as_deref()) {
-            let matched_resource = find_matching_table_file(file, game);
-            return Some(MatchResult {
-                file,
-                game,
-                confidence: Confidence::High,
-                score: 1.0,
-                matched_resource,
-            });
-        }
+    if let Some(ref rom) = meta.rom_name
+        && let Some(game) =
+            resolve_rom_game(rom_games, &rom.to_lowercase(), meta.author_name.as_deref())
+    {
+        let matched_resource = find_matching_table_file(file, game);
+        return Some(MatchResult {
+            file,
+            game,
+            confidence: Confidence::High,
+            score: 1.0,
+            matched_resource,
+        });
     }
 
     // Try table name from VPX metadata
@@ -250,7 +242,9 @@ fn try_vpx_metadata_match<'a>(
         let normalized = normalize(table_name);
         if !normalized.is_empty() {
             let author = meta.author_name.as_deref();
-            if let Some((game, score)) = find_best_match_with_author(&normalized, normalized_games, author) {
+            if let Some((game, score)) =
+                find_best_match_with_author(&normalized, normalized_games, author)
+            {
                 let confidence = if score >= 0.9 {
                     Confidence::High
                 } else if score >= 0.65 {
@@ -276,10 +270,7 @@ fn try_vpx_metadata_match<'a>(
 // --- Resource-level matching ---
 
 /// Dispatch to the appropriate resource matcher based on file type.
-fn find_resource_for_file<'a>(
-    file: &ScannedFile,
-    game: &'a Game,
-) -> Option<MatchedResource<'a>> {
+fn find_resource_for_file<'a>(file: &ScannedFile, game: &'a Game) -> Option<MatchedResource<'a>> {
     match file.resource_type {
         ResourceType::Tables => find_matching_table_file(file, game),
         ResourceType::Backglasses => find_matching_b2s_file(file, game),
@@ -289,10 +280,7 @@ fn find_resource_for_file<'a>(
 }
 
 /// Find the best matching TableFile within a game using VPX metadata.
-fn find_matching_table_file<'a>(
-    file: &ScannedFile,
-    game: &'a Game,
-) -> Option<MatchedResource<'a>> {
+fn find_matching_table_file<'a>(file: &ScannedFile, game: &'a Game) -> Option<MatchedResource<'a>> {
     if game.table_files.is_empty() {
         return None;
     }
@@ -313,7 +301,7 @@ fn find_matching_table_file<'a>(
         }
 
         // Author match
-        if let Some(ref file_author) = meta.and_then(|m| m.author_name.as_ref()) {
+        if let Some(file_author) = meta.and_then(|m| m.author_name.as_ref()) {
             let lower = file_author.to_lowercase();
             if tf.authors.iter().any(|a| {
                 let a_lower = a.to_lowercase();
@@ -324,18 +312,15 @@ fn find_matching_table_file<'a>(
         }
 
         // Version match
-        if let Some(ref file_version) = meta.and_then(|m| m.table_version.as_ref()) {
-            if let Some(ref tf_version) = tf.version {
-                if tf_version == *file_version {
-                    score += 2;
-                }
-            }
+        if let Some(file_version) = meta.and_then(|m| m.table_version.as_ref())
+            && let Some(ref tf_version) = tf.version
+            && tf_version == file_version
+        {
+            score += 2;
         }
 
-        if score > 0 {
-            if best.is_none() || score > best.unwrap().1 {
-                best = Some((tf, score));
-            }
+        if score > 0 && (best.is_none() || score > best.unwrap().1) {
+            best = Some((tf, score));
         }
     }
 
@@ -343,10 +328,7 @@ fn find_matching_table_file<'a>(
 }
 
 /// Find the best matching B2sFile within a game using B2S metadata.
-fn find_matching_b2s_file<'a>(
-    file: &ScannedFile,
-    game: &'a Game,
-) -> Option<MatchedResource<'a>> {
+fn find_matching_b2s_file<'a>(file: &ScannedFile, game: &'a Game) -> Option<MatchedResource<'a>> {
     if game.b2s_files.is_empty() {
         return None;
     }
@@ -357,7 +339,7 @@ fn find_matching_b2s_file<'a>(
     let meta = file.b2s_metadata.as_ref();
 
     // Try author match
-    if let Some(ref file_author) = meta.and_then(|m| m.author.as_ref()) {
+    if let Some(file_author) = meta.and_then(|m| m.author.as_ref()) {
         let lower = file_author.to_lowercase();
         for bf in &game.b2s_files {
             if bf.authors.iter().any(|a| {
@@ -373,17 +355,22 @@ fn find_matching_b2s_file<'a>(
 }
 
 /// Find the matching RomFile within a game by ROM identifier.
-fn find_matching_rom_file<'a>(
-    file: &ScannedFile,
-    game: &'a Game,
-) -> Option<MatchedResource<'a>> {
+fn find_matching_rom_file<'a>(file: &ScannedFile, game: &'a Game) -> Option<MatchedResource<'a>> {
     let lower_stem = file.stem.to_lowercase();
 
     for rf in &game.rom_files {
-        if rf.version.as_ref().is_some_and(|v| v.to_lowercase() == lower_stem) {
+        if rf
+            .version
+            .as_ref()
+            .is_some_and(|v| v.to_lowercase() == lower_stem)
+        {
             return Some(MatchedResource::Rom(rf));
         }
-        if rf.name.as_ref().is_some_and(|n| n.to_lowercase() == lower_stem) {
+        if rf
+            .name
+            .as_ref()
+            .is_some_and(|n| n.to_lowercase() == lower_stem)
+        {
             return Some(MatchedResource::Rom(rf));
         }
     }
@@ -419,13 +406,6 @@ fn resolve_rom_game<'a>(
 /// Find the best matching game for a normalized file stem.
 /// When `file_author` is provided, games whose resources list that author
 /// get a score bonus to break ties between similarly-named games.
-fn find_best_match<'a>(
-    stem: &str,
-    games: &[(&'a Game, String)],
-) -> Option<(&'a Game, f64)> {
-    find_best_match_with_author(stem, games, None)
-}
-
 fn find_best_match_with_author<'a>(
     stem: &str,
     games: &[(&'a Game, String)],
@@ -438,10 +418,10 @@ fn find_best_match_with_author<'a>(
 
         if score >= 0.5 {
             // Boost score if author matches any resource in this game
-            if let Some(author) = file_author {
-                if game_has_matching_author(game, author) {
-                    score += 0.1;
-                }
+            if let Some(author) = file_author
+                && game_has_matching_author(game, author)
+            {
+                score += 0.1;
             }
 
             if best.is_none() || score > best.unwrap().1 {
@@ -487,11 +467,27 @@ fn normalize(name: &str) -> String {
 
     // Remove common non-game-name tokens
     let strip_words = [
-        "vpx", "vpt", "fx", "fx2", "fx3", "fpt", "vpw",
-        "mod", "premium", "le", "pro", "se", "ce",
-        "4k", "2k", "1080p",
-        "table", "ultradmd", "flexdmd",
-        "frankenstein", "release",
+        "vpx",
+        "vpt",
+        "fx",
+        "fx2",
+        "fx3",
+        "fpt",
+        "vpw",
+        "mod",
+        "premium",
+        "le",
+        "pro",
+        "se",
+        "ce",
+        "4k",
+        "2k",
+        "1080p",
+        "table",
+        "ultradmd",
+        "flexdmd",
+        "frankenstein",
+        "release",
     ];
 
     let words: Vec<&str> = s.split_whitespace().collect();
@@ -657,17 +653,29 @@ mod tests {
 
     #[test]
     fn normalize_strips_parenthesized() {
-        assert_eq!(normalize("Medieval Madness (Bigus Mod)"), "medieval madness");
+        assert_eq!(
+            normalize("Medieval Madness (Bigus Mod)"),
+            "medieval madness"
+        );
     }
 
     #[test]
     fn normalize_real_world_filenames() {
-        assert_eq!(normalize("Fish Tales (Williams 1992) VPW 1.1"), "fish tales");
+        assert_eq!(
+            normalize("Fish Tales (Williams 1992) VPW 1.1"),
+            "fish tales"
+        );
         assert_eq!(normalize("Goldeneye (Sega 1996) VPW 1.2"), "goldeneye");
         assert_eq!(normalize("Judge Dredd (Bally 1993) 3.1"), "judge dredd");
-        assert_eq!(normalize("Metallica Premium Monsters (Stern 2013) VPW 2.0"), "metallica monsters");
+        assert_eq!(
+            normalize("Metallica Premium Monsters (Stern 2013) VPW 2.0"),
+            "metallica monsters"
+        );
         assert_eq!(normalize("Catacomb (Stern 1981) v2.0.1"), "catacomb");
-        assert_eq!(normalize("Fathom (Bally 1981) FrankEnstein 3.0.2"), "fathom");
+        assert_eq!(
+            normalize("Fathom (Bally 1981) FrankEnstein 3.0.2"),
+            "fathom"
+        );
         assert_eq!(normalize("KILLERINSTINCTv1.0"), "killerinstinct");
     }
 
@@ -731,10 +739,7 @@ mod tests {
             make_scanned("Hook"),
             make_scanned("Unknown_Game_XYZ"),
         ];
-        let games = vec![
-            make_game("g1", "Medieval Madness"),
-            make_game("g2", "Hook"),
-        ];
+        let games = vec![make_game("g1", "Medieval Madness"), make_game("g2", "Hook")];
 
         let results = match_files(&files, &games);
         assert_eq!(results.matches.len(), 2);

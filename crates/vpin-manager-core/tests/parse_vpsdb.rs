@@ -165,14 +165,21 @@ fn parse_real_vpsdb() {
         let resp = reqwest::get(url).await.expect("failed to fetch vpsdb.json");
         let bytes = resp.bytes().await.expect("failed to read response body");
 
-        let games: Vec<Game> =
-            serde_json::from_slice(&bytes).expect("failed to parse vpsdb.json");
+        let games: Vec<Game> = serde_json::from_slice(&bytes).expect("failed to parse vpsdb.json");
 
-        assert!(games.len() > 2000, "expected 2000+ games, got {}", games.len());
+        assert!(
+            games.len() > 2000,
+            "expected 2000+ games, got {}",
+            games.len()
+        );
 
         let total_resources: usize = games.iter().map(|g| g.resource_count()).sum();
         assert!(total_resources > 10000);
 
-        println!("Parsed {} games with {} total resources", games.len(), total_resources);
+        println!(
+            "Parsed {} games with {} total resources",
+            games.len(),
+            total_resources
+        );
     });
 }

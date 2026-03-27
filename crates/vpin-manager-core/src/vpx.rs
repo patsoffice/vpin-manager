@@ -25,8 +25,8 @@ pub struct VpxMetadata {
 
 /// Read metadata from a VPX file.
 pub fn read_vpx_metadata(path: &Path) -> Result<VpxMetadata, VpxError> {
-    let mut vpx_file = vpin::vpx::open(path)
-        .map_err(|e| VpxError::Io(format!("{}: {e}", path.display())))?;
+    let mut vpx_file =
+        vpin::vpx::open(path).map_err(|e| VpxError::Io(format!("{}: {e}", path.display())))?;
 
     let table_info = vpx_file
         .read_tableinfo()
@@ -67,12 +67,12 @@ fn extract_rom_name(code: &str) -> Option<String> {
     ];
 
     for pattern in &patterns {
-        if let Some(caps) = pattern.captures(code) {
-            if let Some(name) = caps.get(1) {
-                let val = name.as_str().trim().to_string();
-                if !val.is_empty() {
-                    return Some(val);
-                }
+        if let Some(caps) = pattern.captures(code)
+            && let Some(name) = caps.get(1)
+        {
+            let val = name.as_str().trim().to_string();
+            if !val.is_empty() {
+                return Some(val);
             }
         }
     }
@@ -83,9 +83,7 @@ fn extract_rom_name(code: &str) -> Option<String> {
 /// Check if the VBScript code requires PinMAME.
 fn script_requires_pinmame(code: &str) -> bool {
     let lower = code.to_lowercase();
-    lower.contains("loadvpm")
-        || lower.contains("loadcore")
-        || lower.contains("vpmmapexits")
+    lower.contains("loadvpm") || lower.contains("loadcore") || lower.contains("vpmmapexits")
 }
 
 fn non_empty(s: Option<String>) -> Option<String> {

@@ -3,8 +3,7 @@ use std::path::{Path, PathBuf};
 
 use crate::vpsdb::models::Game;
 
-const VPSDB_URL: &str =
-    "https://virtualpinballspreadsheet.github.io/vps-db/db/vpsdb.json";
+const VPSDB_URL: &str = "https://virtualpinballspreadsheet.github.io/vps-db/db/vpsdb.json";
 const LAST_UPDATED_URL: &str =
     "https://virtualpinballspreadsheet.github.io/vps-db/lastUpdated.json";
 const DB_FILENAME: &str = "vpsdb.json";
@@ -78,10 +77,7 @@ impl VpsDb {
         let remote_ts = self.fetch_remote_timestamp().await?;
         let local_ts = self.read_local_timestamp();
 
-        let needs_download = match local_ts {
-            Some(local) if local >= remote_ts => false,
-            _ => true,
-        };
+        let needs_download = !matches!(local_ts, Some(local) if local >= remote_ts);
 
         if needs_download || !self.db_path().exists() {
             let bytes = self
@@ -170,10 +166,9 @@ impl std::fmt::Display for FetchError {
             FetchError::InvalidTimestamp(s) => {
                 write!(f, "invalid timestamp from server: {s:?}")
             }
-            FetchError::NoCachedDb => write!(
-                f,
-                "no cached database found, run 'vpin-manager sync' first"
-            ),
+            FetchError::NoCachedDb => {
+                write!(f, "no cached database found, run 'vpin-manager sync' first")
+            }
         }
     }
 }
@@ -202,7 +197,6 @@ impl From<serde_json::Error> for FetchError {
 pub fn resolve_cache_dir(override_dir: Option<&Path>) -> PathBuf {
     match override_dir {
         Some(dir) => dir.to_path_buf(),
-        None => VpsDb::default_cache_dir()
-            .unwrap_or_else(|| PathBuf::from(".vpin-manager")),
+        None => VpsDb::default_cache_dir().unwrap_or_else(|| PathBuf::from(".vpin-manager")),
     }
 }

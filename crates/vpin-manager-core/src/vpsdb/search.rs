@@ -38,7 +38,9 @@ pub fn search<'a>(
     let mut results: Vec<&Game> = games.iter().filter(|g| matches_query(g, query)).collect();
 
     match sort {
-        SortOrder::Name => results.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase())),
+        SortOrder::Name => {
+            results.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        }
         SortOrder::Year => results.sort_by(|a, b| a.year.cmp(&b.year)),
         SortOrder::Manufacturer => results.sort_by(|a, b| {
             let ma = a.manufacturer.as_deref().unwrap_or("");
@@ -77,10 +79,10 @@ fn matches_query(game: &Game, query: &SearchQuery) -> bool {
         }
     }
 
-    if let Some(year) = query.year {
-        if game.year != Some(year) {
-            return false;
-        }
+    if let Some(year) = query.year
+        && game.year != Some(year)
+    {
+        return false;
     }
 
     if let Some(ref gt) = query.game_type {
@@ -93,10 +95,11 @@ fn matches_query(game: &Game, query: &SearchQuery) -> bool {
 
     if let Some(ref fmt) = query.table_format {
         let lower = fmt.to_lowercase();
-        let has_format = game
-            .table_files
-            .iter()
-            .any(|t| t.table_format.as_ref().is_some_and(|f| f.to_lowercase() == lower));
+        let has_format = game.table_files.iter().any(|t| {
+            t.table_format
+                .as_ref()
+                .is_some_and(|f| f.to_lowercase() == lower)
+        });
         if !has_format {
             return false;
         }
