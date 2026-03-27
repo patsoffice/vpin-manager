@@ -52,10 +52,28 @@ pub fn match_files<'a>(
         .map(|g| (g, normalize(&g.name)))
         .collect();
 
+    // Also build a ROM name -> Game lookup for VPX metadata matching.
+    let rom_games: std::collections::HashMap<String, &Game> = games
+        .iter()
+        .flat_map(|g| {
+            g.rom_files
+                .iter()
+                .filter_map(|r| r.version.as_ref())
+                .map(move |rom| (rom.to_lowercase(), g))
+        })
+        .collect();
+
     let mut matches = Vec::new();
     let mut unmatched = Vec::new();
 
     for file in files {
+        // Try VPX metadata first (most accurate)
+        if let Some(result) = try_vpx_metadata_match(file, &normalized_games, &rom_games) {
+            matches.push(result);
+            continue;
+        }
+
+        // Fall back to filename-based matching
         let normalized_stem = normalize(&file.stem);
 
         if let Some((game, score)) = find_best_match(&normalized_stem, &normalized_games) {
@@ -88,6 +106,51 @@ pub fn match_files<'a>(
     ImportResults { matches, unmatched }
 }
 
+/// Try to match using VPX metadata (table name from file, ROM name).
+fn try_vpx_metadata_match<'a>(
+    file: &'a ScannedFile,
+    normalized_games: &[(&'a Game, String)],
+    rom_games: &std::collections::HashMap<String, &'a Game>,
+) -> Option<MatchResult<'a>> {
+    let meta = file.vpx_metadata.as_ref()?;
+
+    // Try ROM name match first (most precise)
+    if let Some(ref rom) = meta.rom_name {
+        if let Some(&game) = rom_games.get(&rom.to_lowercase()) {
+            return Some(MatchResult {
+                file,
+                game,
+                confidence: Confidence::High,
+                score: 1.0,
+            });
+        }
+    }
+
+    // Try table name from VPX metadata
+    if let Some(ref table_name) = meta.table_name {
+        let normalized = normalize(table_name);
+        if !normalized.is_empty() {
+            if let Some((game, score)) = find_best_match(&normalized, normalized_games) {
+                let confidence = if score >= 0.9 {
+                    Confidence::High
+                } else if score >= 0.65 {
+                    Confidence::Medium
+                } else {
+                    Confidence::Low
+                };
+                return Some(MatchResult {
+                    file,
+                    game,
+                    confidence,
+                    score,
+                });
+            }
+        }
+    }
+
+    None
+}
+
 /// Find the best matching game for a normalized file stem.
 /// Returns the game and a similarity score (0.0 to 1.0).
 fn find_best_match<'a>(
@@ -111,39 +174,57 @@ fn find_best_match<'a>(
 
 /// Normalize a name for comparison:
 /// - Lowercase
+/// - Remove all parenthesized content like "(Williams 1992)" or "(Author Mod)"
 /// - Replace separators (underscores, hyphens, dots) with spaces
-/// - Strip common suffixes (version numbers, "vpx", "vpt", "mod", etc.)
+/// - Strip common suffixes and tokens
+/// - Remove version patterns
 /// - Collapse whitespace
 /// - Trim
 fn normalize(name: &str) -> String {
     let mut s = name.to_lowercase();
 
-    // Replace separators with spaces
-    s = s.replace(['_', '-', '.'], " ");
-
-    // Remove common suffixes/tokens that don't contribute to the game name
-    let strip_tokens = [
-        "vpx", "vpt", "fx", "fx2", "fx3", "fpt",
-        "mod", "premium", "le", "pro",
-        "v1", "v2", "v3", "v4", "v5",
-        "1 0", "1 1", "1 2", "2 0", "3 0",
-    ];
-    for token in strip_tokens {
-        // Only strip if it's a separate word (surrounded by spaces or at boundary)
-        let pattern = format!(" {token}");
-        if s.ends_with(&pattern) {
-            s.truncate(s.len() - pattern.len());
+    // Remove all parenthesized content: "(Williams 1992)", "(Author Mod)", etc.
+    while let Some(start) = s.find('(') {
+        if let Some(end) = s[start..].find(')') {
+            s.replace_range(start..start + end + 1, "");
+        } else {
+            s.truncate(start);
+            break;
         }
     }
 
-    // Remove version patterns like "v1.0.0" or "1.0" at end
-    // After separator replacement these look like "v1 0 0" or "1 0"
-    // Already handled by strip_tokens above for common cases.
+    // Replace separators with spaces
+    s = s.replace(['_', '-', '.'], " ");
 
-    // Remove trailing parenthesized content like "(Author Mod)"
-    if let Some(paren_start) = s.rfind('(') {
-        s.truncate(paren_start);
-    }
+    // Remove common non-game-name tokens wherever they appear as whole words
+    let strip_words = [
+        "vpx", "vpt", "fx", "fx2", "fx3", "fpt", "vpw",
+        "mod", "premium", "le", "pro", "se", "ce",
+        "4k", "2k", "1080p",
+        "table", "ultradmd", "flexdmd",
+        "frankenstein", "release",
+    ];
+
+    let words: Vec<&str> = s.split_whitespace().collect();
+    let filtered: Vec<&str> = words
+        .into_iter()
+        .filter(|w| !strip_words.contains(w))
+        .collect();
+    s = filtered.join(" ");
+
+    // Remove trailing version patterns like "v1.0.0", "1.0", "3 1", "v1 2 2"
+    // After separator replacement, these look like "v1 0 0" or "1 2"
+    // Also handles no-space versions like "tablev1 0" from "tablev1.0"
+    let version_pattern = regex_lite::Regex::new(
+        r"\s*v\d+(\s+\d+)*\s*$"
+    ).unwrap();
+    s = version_pattern.replace(&s, "").to_string();
+
+    // Also strip trailing bare numbers like " 3 1" or " 2 0"
+    let trailing_numbers = regex_lite::Regex::new(
+        r"\s+\d+(\s+\d+)*\s*$"
+    ).unwrap();
+    s = trailing_numbers.replace(&s, "").to_string();
 
     // Collapse whitespace and trim
     s.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -198,6 +279,7 @@ mod tests {
             resource_type: ResourceType::Tables,
             stem: stem.to_string(),
             size: 1000,
+            vpx_metadata: None,
         }
     }
 
@@ -238,14 +320,13 @@ mod tests {
     fn normalize_strips_separators() {
         assert_eq!(normalize("Medieval_Madness"), "medieval madness");
         assert_eq!(normalize("Hook-VPX"), "hook");
-        assert_eq!(normalize("Some.Table.Name"), "some table name");
+        assert_eq!(normalize("Some.Table.Name"), "some name");
     }
 
     #[test]
     fn normalize_strips_version_suffixes() {
         assert_eq!(normalize("Medieval_Madness_VPX"), "medieval madness");
         assert_eq!(normalize("Hook_Mod"), "hook");
-        assert_eq!(normalize("Table_v2"), "table");
     }
 
     #[test]
@@ -253,6 +334,39 @@ mod tests {
         assert_eq!(
             normalize("Medieval Madness (Bigus Mod)"),
             "medieval madness"
+        );
+    }
+
+    #[test]
+    fn normalize_real_world_filenames() {
+        // Common VPX naming patterns from real collections
+        assert_eq!(
+            normalize("Fish Tales (Williams 1992) VPW 1.1"),
+            "fish tales"
+        );
+        assert_eq!(
+            normalize("Goldeneye (Sega 1996) VPW 1.2"),
+            "goldeneye"
+        );
+        assert_eq!(
+            normalize("Judge Dredd (Bally 1993) 3.1"),
+            "judge dredd"
+        );
+        assert_eq!(
+            normalize("Metallica Premium Monsters (Stern 2013) VPW 2.0"),
+            "metallica monsters"
+        );
+        assert_eq!(
+            normalize("Catacomb (Stern 1981) v2.0.1"),
+            "catacomb"
+        );
+        assert_eq!(
+            normalize("Fathom (Bally 1981) FrankEnstein 3.0.2"),
+            "fathom"
+        );
+        assert_eq!(
+            normalize("KILLERINSTINCTv1.0"),
+            "killerinstinct"
         );
     }
 

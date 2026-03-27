@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::config::ResourceType;
+use crate::vpx::VpxMetadata;
 
 /// A file discovered during a directory scan.
 #[derive(Debug, Clone)]
@@ -12,6 +13,8 @@ pub struct ScannedFile {
     pub stem: String,
     /// File size in bytes.
     pub size: u64,
+    /// Metadata extracted from VPX files (table name, author, ROM, etc.).
+    pub vpx_metadata: Option<VpxMetadata>,
 }
 
 /// Results of a directory scan.
@@ -119,77 +122,97 @@ fn scan_recursive(
 
 fn classify_file(path: &Path) -> Option<ScannedFile> {
     let extension = path.extension()?.to_str()?;
+    let file_name = path.file_name()?.to_str()?;
     let stem = path.file_stem()?.to_str()?.to_string();
     let size = path.metadata().map(|m| m.len()).unwrap_or(0);
 
+    let (resource_type, final_stem) = classify_type(path, extension, file_name, &stem)?;
+
+    // Read VPX metadata for .vpx files
+    let vpx_metadata = if extension.eq_ignore_ascii_case("vpx") {
+        crate::vpx::read_vpx_metadata(path).ok()
+    } else {
+        None
+    };
+
+    Some(ScannedFile {
+        path: path.to_path_buf(),
+        resource_type,
+        stem: final_stem,
+        size,
+        vpx_metadata,
+    })
+}
+
+/// Determine the resource type and effective stem for a file.
+/// Returns None if the file is not a recognized virtual pinball resource.
+fn classify_type(
+    path: &Path,
+    extension: &str,
+    file_name: &str,
+    stem: &str,
+) -> Option<(ResourceType, String)> {
     // Check extension map first
     if let Some(&(_, rt)) = EXTENSION_MAP.iter().find(|(ext, _)| ext.eq_ignore_ascii_case(extension)) {
-        return Some(ScannedFile {
-            path: path.to_path_buf(),
-            resource_type: rt,
-            stem,
-            size,
-        });
+        return Some((rt, stem.to_string()));
     }
 
-    // Check if ZIP/RAR/7z might be a ROM or other resource based on name patterns
-    if matches!(
-        extension.to_lowercase().as_str(),
-        "zip" | "rar" | "7z"
-    ) {
+    // Check if ZIP/RAR/7z
+    if matches!(extension.to_lowercase().as_str(), "zip" | "rar" | "7z") {
+        let lower_name = file_name.to_lowercase();
         let lower_stem = stem.to_lowercase();
+
+        // Check for double extensions like .vpx.zip, .directb2s.zip
+        if let Some(inner_ext) = Path::new(stem).extension().and_then(|e| e.to_str()) {
+            if let Some(&(_, rt)) = EXTENSION_MAP.iter().find(|(ext, _)| ext.eq_ignore_ascii_case(inner_ext)) {
+                let inner_stem = Path::new(stem)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(stem)
+                    .to_string();
+                return Some((rt, inner_stem));
+            }
+        }
 
         // Check name patterns
         for &(pattern, rt) in NAME_PATTERNS {
             if lower_stem.contains(pattern) {
-                return Some(ScannedFile {
-                    path: path.to_path_buf(),
-                    resource_type: rt,
-                    stem,
-                    size,
-                });
+                return Some((rt, stem.to_string()));
             }
         }
 
-        // Small ZIPs in a "roms" parent directory are likely ROMs
+        // Archives in a "Tables" directory are likely tables
+        if is_in_directory(path, "tables") {
+            return Some((ResourceType::Tables, stem.to_string()));
+        }
+
+        // ZIPs in a "roms" parent directory are likely ROMs
         if is_in_directory(path, "roms") || is_in_directory(path, "rom") {
-            return Some(ScannedFile {
-                path: path.to_path_buf(),
-                resource_type: ResourceType::Roms,
-                stem,
-                size,
-            });
+            return Some((ResourceType::Roms, stem.to_string()));
         }
 
         // Archives in an "altsound" directory
         if is_in_directory(path, "altsound") || is_in_directory(path, "alt_sound") {
-            return Some(ScannedFile {
-                path: path.to_path_buf(),
-                resource_type: ResourceType::AltSound,
-                stem,
-                size,
-            });
+            return Some((ResourceType::AltSound, stem.to_string()));
         }
 
         // Archives in an "altcolor" directory
         if is_in_directory(path, "altcolor") || is_in_directory(path, "alt_color") {
-            return Some(ScannedFile {
-                path: path.to_path_buf(),
-                resource_type: ResourceType::AltColor,
-                stem,
-                size,
-            });
+            return Some((ResourceType::AltColor, stem.to_string()));
+        }
+
+        // Check for common table-related terms in the name
+        if lower_name.contains("vpx") || lower_name.contains("vpt") || lower_name.contains("vpw") {
+            return Some((ResourceType::Tables, stem.to_string()));
         }
     }
 
-    // MP3 files are sound
-    if extension.eq_ignore_ascii_case("mp3") || extension.eq_ignore_ascii_case("wav") || extension.eq_ignore_ascii_case("ogg") {
-        return Some(ScannedFile {
-            path: path.to_path_buf(),
-            resource_type: ResourceType::Sound,
-            stem,
-            size,
-        });
+    // MP3/WAV/OGG files are sound
+    if extension.eq_ignore_ascii_case("mp3")
+        || extension.eq_ignore_ascii_case("wav")
+        || extension.eq_ignore_ascii_case("ogg")
+    {
+        return Some((ResourceType::Sound, stem.to_string()));
     }
 
     None
@@ -302,6 +325,56 @@ mod tests {
         let results = scan_directory(Path::new("/nonexistent/path/12345"));
         assert!(results.files.is_empty());
         assert!(!results.errors.is_empty());
+    }
+
+    #[test]
+    fn scan_vpx_zip_double_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("Fish Tales (Williams 1992) VPW 1.1.vpx.zip"),
+            b"fake",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("Hook.directb2s.zip"),
+            b"fake",
+        )
+        .unwrap();
+
+        let results = scan_directory(dir.path());
+        assert_eq!(results.files.len(), 2);
+
+        let table = results.files.iter().find(|f| f.resource_type == ResourceType::Tables).unwrap();
+        assert_eq!(table.stem, "Fish Tales (Williams 1992) VPW 1.1");
+
+        let b2s = results.files.iter().find(|f| f.resource_type == ResourceType::Backglasses).unwrap();
+        assert_eq!(b2s.stem, "Hook");
+    }
+
+    #[test]
+    fn scan_archives_in_tables_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let tables_dir = dir.path().join("Tables");
+        fs::create_dir(&tables_dir).unwrap();
+        fs::write(tables_dir.join("Jurassic Park 30th.zip"), b"fake").unwrap();
+
+        let results = scan_directory(dir.path());
+        assert_eq!(results.files.len(), 1);
+        assert_eq!(results.files[0].resource_type, ResourceType::Tables);
+    }
+
+    #[test]
+    fn scan_vpw_in_name() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("Skateball (Bally 1980) VPW 1.0.vpx.zip"),
+            b"fake",
+        )
+        .unwrap();
+
+        let results = scan_directory(dir.path());
+        assert_eq!(results.files.len(), 1);
+        assert_eq!(results.files[0].resource_type, ResourceType::Tables);
     }
 
     #[test]

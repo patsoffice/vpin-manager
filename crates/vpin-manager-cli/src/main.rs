@@ -542,7 +542,11 @@ fn cmd_import(
             game_id: m.game.id.clone(),
             game_name: m.game.name.clone(),
             resource_type: m.file.resource_type.to_string().to_lowercase(),
-            version: None,
+            version: m
+                .file
+                .vpx_metadata
+                .as_ref()
+                .and_then(|meta| meta.table_version.clone()),
             file_path: m.file.path.to_string_lossy().to_string(),
             installed_at: None,
             vps_updated_at: m.game.updated_at,
